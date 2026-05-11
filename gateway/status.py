@@ -110,6 +110,12 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
 
 def _get_process_start_time(pid: int) -> Optional[int]:
     """Return the kernel start time for a process when available."""
+    if sys.platform == "win32":
+        try:
+            os.kill(pid, 0)
+            return True  # process exists; we can't get its start_time on Windows without psutil
+        except OSError:
+            return None
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
@@ -125,6 +131,8 @@ def get_process_start_time(pid: int) -> Optional[int]:
 
 def _read_process_cmdline(pid: int) -> Optional[str]:
     """Return the process command line as a space-separated string."""
+    if sys.platform == "win32":
+        return None
     cmdline_path = Path(f"/proc/{pid}/cmdline")
     try:
         raw = cmdline_path.read_bytes()
