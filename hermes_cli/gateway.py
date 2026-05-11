@@ -1393,7 +1393,9 @@ def _ensure_user_systemd_env() -> None:
     We detect the standard socket path and set the vars so all subsequent
     subprocess calls inherit them.
     """
-    uid = os.getuid()  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
+    if sys.platform == "win32":
+        return  # systemd-style user services are POSIX-only; on Windows we will use a different service-install path
+    uid = os.getuid()
     if "XDG_RUNTIME_DIR" not in os.environ:
         runtime_dir = f"/run/user/{uid}"
         if Path(runtime_dir).exists():
@@ -1776,7 +1778,9 @@ def print_systemd_scope_conflict_warning() -> None:
 
 
 def _require_root_for_system_service(action: str) -> None:
-    if os.geteuid() != 0:  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
+    if sys.platform == "win32":
+        return  # systemd-style user services are POSIX-only; on Windows we will use a different service-install path
+    if os.geteuid() != 0:
         raise SystemScopeRequiresRootError(
             f"System gateway {action} requires root. Re-run with sudo.",
             action,
@@ -1838,6 +1842,8 @@ def prompt_linux_gateway_install_scope() -> str | None:
 
 
 def install_linux_gateway_from_setup(force: bool = False) -> tuple[str | None, bool]:
+    if sys.platform == "win32":
+        return  # systemd-style user services are POSIX-only; on Windows we will use a different service-install path
     scope = prompt_linux_gateway_install_scope()
     if scope is None:
         return None, False
