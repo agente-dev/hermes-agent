@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-agent"
-version = "0.13.1"
+version = "0.13.2"
 description = "The self-improving AI agent — creates skills from experience, improves them during use, and runs anywhere"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -186,6 +186,11 @@ py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajector
 [tool.setuptools.package-data]
 hermes_cli = ["web_dist/**/*"]
 gateway = ["assets/**/*"]
+# Bundled plugin manifests — without these, `get_bundled_plugins_dir()`
+# scans the pip-installed wheel and finds zero `plugin.yaml` files, so
+# the loader registers nothing. Wildcard ships plugin.yaml + README/etc.
+# for every bundled plugin (kanban, google_meet, agente_desktop, ...).
+"plugins" = ["**/plugin.yaml", "**/*.md", "**/*.yaml", "**/*.json"]
 
 [tool.setuptools.packages.find]
 include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]
