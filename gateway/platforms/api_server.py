@@ -3421,6 +3421,12 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
             self._app.router.add_post("/v1/runs/{run_id}/approval", self._handle_run_approval)
             self._app.router.add_post("/v1/runs/{run_id}/stop", self._handle_stop_run)
+            # Agente Desktop plugin routes (optional; skipped if package absent)
+            try:
+                from agente_hermes_addon.api_routes import register_routes as _reg_agente
+                _reg_agente(self._app, self._check_auth)
+            except ImportError:
+                pass
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
             try:
