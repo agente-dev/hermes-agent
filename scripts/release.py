@@ -123,6 +123,8 @@ AUTHOR_MAP = {
     "abdielv@proton.me": "AJV20",
     "mason@growagainorchids.com": "masonjames",
     "108541149+amethystani@users.noreply.github.com": "amethystani",
+    "amethystani@users.noreply.github.com": "amethystani",
+    "chris.eth@qq.com": "duyua9",
     "ytchen0719@gmail.com": "liquidchen",
     "am@studio1.tailb672fe.ts.net": "subtract0",
     "mike@grossmann.at": "ReqX",

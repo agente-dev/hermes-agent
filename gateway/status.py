@@ -112,7 +112,7 @@ def _get_process_start_time(pid: int) -> Optional[int]:
     """Return the kernel start time for a process when available."""
     if sys.platform == "win32":
         try:
-            os.kill(pid, 0)
+            os.kill(pid, 0)  # windows-footgun: ok — inside `if sys.platform == "win32":` block; CTRL_C side-effect is intentional here
             return True  # process exists; we can't get its start_time on Windows without psutil
         except OSError:
             return None
