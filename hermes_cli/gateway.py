@@ -1236,9 +1236,17 @@ def _windows_gateway_should_absorb_console_controls() -> bool:
     PowerShell/CMD. Detached service-style launches opt in via
     ``HERMES_GATEWAY_DETACHED=1``; older wrappers without the env marker are
     treated as detached when no interactive stdin is attached.
+
+    ``HERMES_FORCE_ABSORB_CONSOLE=1`` is an unconditional override used by
+    Electron sidecar spawns where neither env var propagation nor stdio
+    detection can be trusted (Windows venv stub re-exec quirks).
     """
     if not is_windows():
         return False
+
+    force = os.getenv("HERMES_FORCE_ABSORB_CONSOLE", "").strip().lower()
+    if force in {"1", "true", "yes", "on"}:
+        return True
 
     detached = os.getenv("HERMES_GATEWAY_DETACHED", "").strip().lower()
     if detached in {"1", "true", "yes", "on"}:
@@ -1395,7 +1403,9 @@ def _ensure_user_systemd_env() -> None:
     We detect the standard socket path and set the vars so all subsequent
     subprocess calls inherit them.
     """
-    uid = os.getuid()  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
+    if sys.platform == "win32":
+        return  # systemd-style user services are POSIX-only; on Windows we will use a different service-install path
+    uid = os.getuid()
     if "XDG_RUNTIME_DIR" not in os.environ:
         runtime_dir = f"/run/user/{uid}"
         if Path(runtime_dir).exists():
@@ -1778,7 +1788,9 @@ def print_systemd_scope_conflict_warning() -> None:
 
 
 def _require_root_for_system_service(action: str) -> None:
-    if os.geteuid() != 0:  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
+    if sys.platform == "win32":
+        return  # systemd-style user services are POSIX-only; on Windows we will use a different service-install path
+    if os.geteuid() != 0:
         raise SystemScopeRequiresRootError(
             f"System gateway {action} requires root. Re-run with sudo.",
             action,
@@ -1840,6 +1852,8 @@ def prompt_linux_gateway_install_scope() -> str | None:
 
 
 def install_linux_gateway_from_setup(force: bool = False) -> tuple[str | None, bool]:
+    if sys.platform == "win32":
+        return  # systemd-style user services are POSIX-only; on Windows we will use a different service-install path
     scope = prompt_linux_gateway_install_scope()
     if scope is None:
         return None, False
@@ -3251,6 +3265,10 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
         argv=sys.argv,
         stdin_is_tty=_stdin_is_tty,
         absorb_windows_console_controls=_absorb_windows_console_controls,
+        env_hermes_gateway_detached=os.environ.get("HERMES_GATEWAY_DETACHED", ""),
+        env_hermes_force_absorb_console=os.environ.get("HERMES_FORCE_ABSORB_CONSOLE", ""),
+        sys_executable=sys.executable,
+        sys_prefix=sys.prefix,
     )
 
     def _atexit_hook() -> None:

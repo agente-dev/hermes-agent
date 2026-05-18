@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Lazy-loaded gateway internals — imported on first request so unit tests can
 # patch them without needing the full gateway environment installed.
 try:
-    from environments.agent_loop import HermesAgentLoop
+    from agente_hermes_addon.agent_loop import HermesAgentLoop
 except ImportError:  # pragma: no cover
     HermesAgentLoop = None  # type: ignore[assignment,misc]
 
