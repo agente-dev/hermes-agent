@@ -111,11 +111,9 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
 def _get_process_start_time(pid: int) -> Optional[int]:
     """Return the kernel start time for a process when available."""
     if sys.platform == "win32":
-        try:
-            os.kill(pid, 0)
-            return True  # process exists; we can't get its start_time on Windows without psutil
-        except OSError:
-            return None
+        # os.kill(pid, 0) is NOT a safe "is alive" probe on Windows (bpo-14484);
+        # use _pid_exists() which calls psutil / ctypes-OpenProcess instead.
+        return True if _pid_exists(pid) else None  # windows-footgun: ok — _pid_exists encapsulates the safe cross-platform check
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
