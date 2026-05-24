@@ -22,8 +22,9 @@ IPC contract:
     200 → {"ok": false, "error": "<string>", "details": <optional>}
     401 → {"ok": false, "error": "unauthorized"}
 
-The Python wrapper unwraps `result` (or surfaces `error`) so the model sees
-the tool's native return shape.
+The Python wrapper unwraps `result` (or surfaces `error`) and serializes it as
+a JSON string so the agent loop can append it as OpenAI-compatible tool
+message content.
 """
 
 from __future__ import annotations
@@ -133,8 +134,8 @@ def _make_handler(tool_name: str):
     own dispatch target. Avoids the late-binding-loop pitfall.
     """
 
-    def handler(args: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-        return _proxy_call(tool_name, args)
+    def handler(args: dict[str, Any], **kwargs: Any) -> str:
+        return json.dumps(_proxy_call(tool_name, args), ensure_ascii=False)
 
     return handler
 
