@@ -114,6 +114,10 @@ scripts/run_tests.sh
 pytest tests/ -v
 ```
 
+Do not mark a failing test with `pytest.mark.xfail` unless the reason names a
+tracked follow-up issue or local intake. Temporary xfails without a tracking
+reference hide CI debt and should be treated as incomplete test cleanup.
+
 ---
 
 ## Project Structure

@@ -128,8 +128,8 @@ class TestVerboseCommand:
                 f"Expected {mode}, got {actual}"
 
     @pytest.mark.asyncio
-    async def test_defaults_to_all_when_no_tool_progress_set(self, tmp_path, monkeypatch):
-        """When tool_progress is not in config, defaults to 'all' then cycles to verbose."""
+    async def test_uses_platform_default_when_no_tool_progress_set(self, tmp_path, monkeypatch):
+        """When tool_progress is not in config, use the platform default."""
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -143,17 +143,17 @@ class TestVerboseCommand:
         runner = _make_runner()
         result = await runner._handle_verbose_command(_make_event())
 
-        # Telegram default is "all" (high tier) → cycles to verbose
-        assert "VERBOSE" in result
+        # Telegram's built-in default is "new" -> cycles to all.
+        assert "ALL" in result
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "verbose"
+        assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "all"
 
     @pytest.mark.asyncio
     async def test_per_platform_isolation(self, tmp_path, monkeypatch):
         """Cycling /verbose on Telegram doesn't change Slack's setting.
 
         Without a global tool_progress, each platform uses its built-in
-        default: Telegram = 'all' (high tier), Slack = 'off' (quiet Slack default).
+        default: Telegram = 'new' (concise high tier), Slack = 'off' (quiet Slack default).
         """
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
@@ -178,8 +178,8 @@ class TestVerboseCommand:
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         platforms = saved["display"]["platforms"]
-        # Telegram: all -> verbose (high tier default = all)
-        assert platforms["telegram"]["tool_progress"] == "verbose"
+        # Telegram: new -> all (concise high tier default = new)
+        assert platforms["telegram"]["tool_progress"] == "all"
         # Slack: off -> new (first /verbose cycle from quiet default)
         assert platforms["slack"]["tool_progress"] == "new"
 

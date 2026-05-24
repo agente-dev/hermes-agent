@@ -8215,7 +8215,7 @@ class GatewayRunner:
 
         if not canonical_cmd:
             return None
-        policy = _policy_for_source(self.config, source)
+        policy = _policy_for_source(getattr(self, "config", None), source)
         if not policy.enabled or policy.can_run(source.user_id, canonical_cmd):
             return None
         logger.info(

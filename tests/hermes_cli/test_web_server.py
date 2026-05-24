@@ -1856,17 +1856,17 @@ class TestPluginAPIAuth:
     def test_plugin_route_allows_auth(self):
         """Plugin API routes should work with a valid session token.
 
-        Use ``/api/plugins/example/hello`` from the example-dashboard plugin —
-        a stable, side-effect-free GET that's always loaded in tests. With a
+        Use the kanban board route, which is a bundled plugin API route that's
+        always loaded in tests. With a
         valid token the handler should run (200); without one the middleware
         should 401 before the handler is reached.
         """
         # Without auth: middleware blocks before reaching the handler.
-        resp = self.client.get("/api/plugins/example/hello")
+        resp = self.client.get("/api/plugins/kanban/board")
         assert resp.status_code == 401
 
         # With auth: handler runs.
-        resp = self.auth_client.get("/api/plugins/example/hello")
+        resp = self.auth_client.get("/api/plugins/kanban/board")
         assert resp.status_code == 200
 
     def test_plugin_post_requires_auth(self):
