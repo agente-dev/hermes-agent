@@ -258,6 +258,28 @@ def test_get_platform_tools_includes_enabled_mcp_servers_by_default():
     assert "disabled-server" not in enabled
 
 
+def test_get_platform_tools_accepts_legacy_list_form_mcp_servers():
+    config = {
+        "mcp_servers": [
+            {
+                "name": "gowa-whatsapp",
+                "url": "http://localhost:58395/sse",
+                "protocol": "sse",
+                "auth": {
+                    "type": "basic",
+                    "username": "user",
+                    "password": "secret",
+                },
+                "tools": ["whatsapp_connection_status"],
+            }
+        ]
+    }
+
+    enabled = _get_platform_tools(config, "api_server")
+
+    assert "gowa-whatsapp" in enabled
+
+
 def test_get_platform_tools_keeps_enabled_mcp_servers_with_explicit_builtin_selection():
     config = {
         "platform_toolsets": {"cli": ["web", "memory"]},

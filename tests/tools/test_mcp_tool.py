@@ -82,6 +82,39 @@ class TestLoadMCPConfig:
             result = _load_mcp_config()
             assert result == {}
 
+    def test_legacy_list_form_config_is_normalized(self):
+        """Desktop alpha.91 wrote list-form MCP config; runtime should normalize it."""
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "mcp_servers": [
+                    {
+                        "name": "gowa-whatsapp",
+                        "url": "http://localhost:58395/sse",
+                        "protocol": "sse",
+                        "auth": {
+                            "type": "basic",
+                            "username": "user",
+                            "password": "secret",
+                        },
+                        "tools": ["whatsapp_connection_status"],
+                    }
+                ]
+            },
+        ):
+            from tools.mcp_tool import _load_mcp_config
+
+            result = _load_mcp_config()
+
+        assert result == {
+            "gowa-whatsapp": {
+                "url": "http://localhost:58395/sse",
+                "transport": "sse",
+                "headers": {"Authorization": "Basic dXNlcjpzZWNyZXQ="},
+                "tools": {"include": ["whatsapp_connection_status"]},
+            }
+        }
+
 
 # ---------------------------------------------------------------------------
 # Schema conversion

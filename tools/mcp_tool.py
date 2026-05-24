@@ -2115,17 +2115,19 @@ def _load_mcp_config() -> Dict[str, dict]:
     """
     try:
         from hermes_cli.config import load_config
+        from hermes_cli.mcp_servers_config import normalize_mcp_servers_config
         config = load_config()
-        servers = config.get("mcp_servers")
-        if not servers or not isinstance(servers, dict):
-            return {}
         # Ensure .env vars are available for interpolation
         try:
             from hermes_cli.env_loader import load_hermes_dotenv
             load_hermes_dotenv()
         except Exception:
             pass
-        return {name: _interpolate_env_vars(cfg) for name, cfg in servers.items()}
+        raw_servers = _interpolate_env_vars(config.get("mcp_servers"))
+        servers = normalize_mcp_servers_config(raw_servers)
+        if not servers:
+            return {}
+        return servers
     except Exception as exc:
         logger.debug("Failed to load MCP config: %s", exc)
         return {}
