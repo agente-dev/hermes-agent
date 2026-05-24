@@ -133,7 +133,7 @@ def _make_handler(tool_name: str):
     own dispatch target. Avoids the late-binding-loop pitfall.
     """
 
-    def handler(args: dict[str, Any]) -> dict[str, Any]:
+    def handler(args: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         return _proxy_call(tool_name, args)
 
     return handler

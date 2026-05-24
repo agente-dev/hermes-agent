@@ -224,6 +224,23 @@ def unit_convert(args: dict, **kwargs) -> str:
 3. **Never raise:** Catch all exceptions, return error JSON instead.
 4. **Accept `**kwargs`:** Hermes may pass additional context in the future.
 
+### Handler kwargs tolerance
+
+Tool dispatch always calls handlers as `handler(args, **kwargs)`. Today those
+extra keyword arguments can include `task_id`, `session_id`, `tool_call_id`, and
+`parent_agent`; future Hermes releases may add more context. Plugin handlers
+must accept and ignore unknown keyword arguments unless they intentionally use
+them:
+
+```python
+def my_tool(args: dict, **kwargs) -> str:
+    ...
+```
+
+Handlers that only declare `def my_tool(args: dict)` will fail with
+`TypeError: got an unexpected keyword argument ...` when they are called from
+the CLI or gateway tool pipeline.
+
 ## Step 5: Write the registration
 
 Create `__init__.py` — this wires schemas to handlers:
