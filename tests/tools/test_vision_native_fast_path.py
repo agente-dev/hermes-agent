@@ -152,6 +152,7 @@ class TestHandleVisionAnalyzeFastPath:
         """Main model supports native vision → fast path returns multimodal."""
         img = tmp_path / "x.png"
         img.write_bytes(_TINY_PNG)
+        monkeypatch.setattr("agent.image_routing._lookup_supports_vision", lambda provider, model: True)
 
         # Set runtime override so the handler thinks we're on opus@openrouter
         from agent.auxiliary_client import set_runtime_main, clear_runtime_main
@@ -170,6 +171,7 @@ class TestHandleVisionAnalyzeFastPath:
         """Non-vision main model → fast path skipped, aux LLM path attempted."""
         img = tmp_path / "x.png"
         img.write_bytes(_TINY_PNG)
+        monkeypatch.setattr("agent.image_routing._lookup_supports_vision", lambda provider, model: False)
 
         async def _aux_sentinel(*args, **kwargs):
             return '{"sentinel": "aux-path"}'
@@ -190,6 +192,7 @@ class TestHandleVisionAnalyzeFastPath:
         """Even with vision-capable model, unknown provider → fall through."""
         img = tmp_path / "x.png"
         img.write_bytes(_TINY_PNG)
+        monkeypatch.setattr("agent.image_routing._lookup_supports_vision", lambda provider, model: True)
 
         async def _aux_sentinel(*args, **kwargs):
             return '{"sentinel": "aux-path"}'
