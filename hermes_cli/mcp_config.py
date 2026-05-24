@@ -24,6 +24,7 @@ from hermes_cli.config import (
     get_hermes_home,  # noqa: F401 — used by test mocks
 )
 from hermes_cli.colors import Colors, color
+from hermes_cli.mcp_servers_config import normalize_mcp_servers_config
 from hermes_constants import display_hermes_home
 
 logger = logging.getLogger(__name__)
@@ -77,10 +78,7 @@ def _get_mcp_servers(config: Optional[dict] = None) -> Dict[str, dict]:
     """Return the ``mcp_servers`` dict from config, or empty dict."""
     if config is None:
         config = load_config()
-    servers = config.get("mcp_servers")
-    if not servers or not isinstance(servers, dict):
-        return {}
-    return servers
+    return normalize_mcp_servers_config(config.get("mcp_servers"))
 
 
 def _save_mcp_server(name: str, server_config: dict):
