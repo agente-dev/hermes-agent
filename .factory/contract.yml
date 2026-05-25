@@ -1,0 +1,27 @@
+repo: hermes-agent
+default_branch: main
+pipeline_stages:
+  - queued
+  - claimed
+  - pr-open
+  - code-approved
+  - agent-proof-approved
+  - verified
+  - changes-requested
+  - pr-blocked
+branch_naming: "meta/hermes-agent/<slug>"
+protected_paths:
+  - .github/workflows/**
+  - pyproject.toml
+  - run_agent.py
+  - model_tools.py
+  - hermes_cli/**
+  - gateway/**
+  - tools/**
+  - plugins/**
+  - cron/**
+  - acp_adapter/**
+  - scripts/**
+approval_gates:
+  code_review: required
+  runtime_proof: required
