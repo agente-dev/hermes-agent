@@ -23,6 +23,7 @@ from hermes_cli.config import (
     cfg_get,
     load_config, save_config, get_env_value, save_env_value,
 )
+from hermes_cli.mcp_servers_config import normalize_mcp_servers_config
 from hermes_cli.colors import Colors, color
 from hermes_cli.nous_subscription import (
     apply_nous_managed_defaults,
@@ -1150,7 +1151,7 @@ def _get_platform_tools(
     # If the platform explicitly lists one or more MCP server names, treat that
     # as an allowlist. Otherwise include every globally enabled MCP server.
     # Special sentinel: "no_mcp" in the toolset list disables all MCP servers.
-    mcp_servers = config.get("mcp_servers") or {}
+    mcp_servers = normalize_mcp_servers_config(config.get("mcp_servers"))
     enabled_mcp_servers = {
         str(name)
         for name, server_cfg in mcp_servers.items()
