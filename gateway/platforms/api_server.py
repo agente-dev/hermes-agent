@@ -8,6 +8,7 @@ Exposes an HTTP server with endpoints:
 - DELETE /v1/responses/{response_id} — Delete a stored response
 - GET  /v1/models                  — lists hermes-agent as an available model
 - GET  /v1/capabilities            — machine-readable API capabilities for external UIs
+- GET  /v1/skills                  — lists available Hermes skills for UI discovery
 - POST /v1/runs                    — start a run, returns run_id immediately (202)
 - GET  /v1/runs/{run_id}           — retrieve current run status
 - GET  /v1/runs/{run_id}/events    — SSE stream of structured lifecycle events
@@ -61,6 +62,7 @@ MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversation
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
+SKILLS_CACHE_TTL_SECONDS = 5.0
 
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
@@ -281,6 +283,17 @@ def _multimodal_validation_error(exc: ValueError, *, param: str) -> "web.Respons
         _openai_error(message, code=code, param=param),
         status=400,
     )
+
+
+def _json_safe_metadata(value: Any) -> Any:
+    """Coerce parsed YAML metadata into values accepted by JSON responses."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe_metadata(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_metadata(item) for item in value]
+    return str(value)
 
 
 def check_api_server_requirements() -> bool:
@@ -616,6 +629,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._skills_cache: Optional[tuple[float, List[Dict[str, Any]]]] = None
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -915,6 +929,49 @@ class APIServerAdapter(BasePlatformAdapter):
             ],
         })
 
+    @staticmethod
+    def _skill_response_item(skill: Dict[str, Any]) -> Dict[str, Any]:
+        frontmatter = skill.get("frontmatter")
+        if not isinstance(frontmatter, dict):
+            frontmatter = {}
+        category = skill.get("category")
+        return {
+            "name": str(skill.get("name") or ""),
+            "description": str(skill.get("description") or ""),
+            "path": str(skill.get("path") or ""),
+            "source": str(skill.get("source") or ""),
+            "category": None if category is None else str(category),
+            "frontmatter": _json_safe_metadata(frontmatter),
+        }
+
+    def _get_cached_skills(self) -> List[Dict[str, Any]]:
+        now = time.monotonic()
+        if self._skills_cache is not None:
+            cached_at, cached_skills = self._skills_cache
+            if now - cached_at < SKILLS_CACHE_TTL_SECONDS:
+                return cached_skills
+
+        from tools.skills_tool import _find_all_skills
+
+        skills = [self._skill_response_item(skill) for skill in _find_all_skills()]
+        self._skills_cache = (now, skills)
+        return skills
+
+    async def _handle_skills(self, request: "web.Request") -> "web.Response":
+        """GET /v1/skills — return available Hermes skills for UI discovery."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            return web.json_response({"skills": self._get_cached_skills()})
+        except Exception as exc:
+            logger.exception("[api_server] skill discovery failed: %s", exc)
+            return web.json_response(
+                _openai_error("Failed to discover skills", code="skills_discovery_failed"),
+                status=500,
+            )
+
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         """GET /v1/capabilities — advertise the stable API surface.
 
@@ -954,6 +1011,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "run_events_sse": True,
                 "run_stop": True,
                 "run_approval_response": True,
+                "skill_discovery": True,
                 "tool_progress_events": True,
                 "approval_events": True,
                 "session_continuity_header": "X-Hermes-Session-Id",
@@ -964,6 +1022,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "health": {"method": "GET", "path": "/health"},
                 "health_detailed": {"method": "GET", "path": "/health/detailed"},
                 "models": {"method": "GET", "path": "/v1/models"},
+                "skills": {"method": "GET", "path": "/v1/skills"},
                 "chat_completions": {"method": "POST", "path": "/v1/chat/completions"},
                 "responses": {"method": "POST", "path": "/v1/responses"},
                 "runs": {"method": "POST", "path": "/v1/runs"},
@@ -3346,6 +3405,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/health/detailed", self._handle_health_detailed)
             self._app.router.add_get("/v1/health", self._handle_health)
             self._app.router.add_get("/v1/models", self._handle_models)
+            self._app.router.add_get("/v1/skills", self._handle_skills)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/responses", self._handle_responses)

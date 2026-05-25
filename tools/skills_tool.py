@@ -469,6 +469,17 @@ def _get_category_from_path(skill_path: Path) -> Optional[str]:
     return None
 
 
+def _get_skill_source_from_scan_dir(scan_dir: Path) -> str:
+    """Return a stable source label for a skill scan root."""
+    try:
+        if scan_dir.resolve() == SKILLS_DIR.resolve():
+            return "local"
+    except Exception:
+        if scan_dir == SKILLS_DIR:
+            return "local"
+    return "external"
+
+
 def _parse_tags(tags_value) -> List[str]:
     """
     Parse tags from frontmatter value.
@@ -555,7 +566,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
             filters out disabled skills.
 
     Returns:
-        List of skill metadata dicts (name, description, category).
+        List of skill metadata dicts.
     """
     from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
 
@@ -572,6 +583,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     dirs_to_scan.extend(get_external_skills_dirs())
 
     for scan_dir in dirs_to_scan:
+        source = _get_skill_source_from_scan_dir(scan_dir)
         for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
@@ -608,7 +620,10 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 skills.append({
                     "name": name,
                     "description": description,
+                    "path": str(skill_md),
+                    "source": source,
                     "category": category,
+                    "frontmatter": frontmatter,
                 })
 
             except (UnicodeDecodeError, PermissionError) as e:
@@ -1530,4 +1545,3 @@ registry.register(
     check_fn=check_skills_requirements,
     emoji="📚",
 )
-
