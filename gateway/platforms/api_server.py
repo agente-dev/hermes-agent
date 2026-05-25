@@ -857,6 +857,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        extra_tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -872,6 +873,12 @@ class APIServerAdapter(BasePlatformAdapter):
         key is meant to persist across transcripts so long-term memory
         providers (e.g. Honcho) can scope their per-chat state correctly
         — matching the semantics of the native gateway's ``session_key``.
+
+        ``extra_tools`` is an optional list of OpenAI-format tool schemas
+        (``{"type": "function", "function": {...}}``) supplied by the caller
+        via the ``tools`` field of the POST body.  These are merged into
+        agent.tools after the agent is created; built-in tools take priority
+        (existing names are never replaced).
         """
         from run_agent import AIAgent
         from gateway.run import _resolve_runtime_agent_kwargs, _resolve_gateway_model, _load_gateway_config, GatewayRunner
@@ -909,6 +916,29 @@ class APIServerAdapter(BasePlatformAdapter):
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
         )
+
+        # Merge caller-supplied tools into the agent's tool surface so the
+        # model can see and invoke desktop-specific tools alongside built-ins.
+        # Built-in names win — we never replace an existing stdlib tool with a
+        # same-named caller-supplied schema to preserve gateway tool semantics.
+        if extra_tools and isinstance(extra_tools, list):
+            if agent.tools is None:
+                agent.tools = []
+            existing_names = {
+                t.get("function", {}).get("name")
+                for t in agent.tools
+                if isinstance(t, dict)
+            }
+            for schema in extra_tools:
+                if not isinstance(schema, dict):
+                    continue
+                fn_name = schema.get("function", {}).get("name") if isinstance(schema.get("function"), dict) else None
+                if fn_name and fn_name not in existing_names:
+                    agent.tools.append(schema)
+                    existing_names.add(fn_name)
+                    if hasattr(agent, "valid_tool_names") and isinstance(agent.valid_tool_names, set):
+                        agent.valid_tool_names.add(fn_name)
+
         return agent
 
     # ------------------------------------------------------------------
@@ -1040,6 +1070,16 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
+
+        # Extract caller-supplied tools (OpenAI tools array) so they can be
+        # merged with the gateway's built-in stdlib tools.  Silently ignore
+        # invalid values so a malformed field never breaks the chat path.
+        raw_tools = body.get("tools")
+        extra_tools: Optional[List[Dict[str, Any]]] = (
+            [t for t in raw_tools if isinstance(t, dict)]
+            if isinstance(raw_tools, list)
+            else None
+        )
 
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         system_prompt = None
@@ -1220,6 +1260,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                extra_tools=extra_tools,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -1239,6 +1280,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                extra_tools=extra_tools,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -2743,6 +2785,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        extra_tools: Optional[List[Dict[str, Any]]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -2754,6 +2797,9 @@ class APIServerAdapter(BasePlatformAdapter):
         at ``agent_ref[0]`` before ``run_conversation`` begins.  This allows
         callers (e.g. the SSE writer) to call ``agent.interrupt()`` from
         another thread to stop in-progress LLM calls.
+
+        ``extra_tools`` is forwarded to ``_create_agent`` and merged into the
+        agent's tool surface alongside the built-in stdlib tools.
         """
         loop = asyncio.get_running_loop()
 
@@ -2766,6 +2812,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_start_callback=tool_start_callback,
                 tool_complete_callback=tool_complete_callback,
                 gateway_session_key=gateway_session_key,
+                extra_tools=extra_tools,
             )
             if agent_ref is not None:
                 agent_ref[0] = agent

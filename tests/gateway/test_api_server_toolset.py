@@ -127,3 +127,98 @@ class TestApiServerAdapterToolset:
             call_kwargs = mock_agent_cls.call_args
             toolsets = call_kwargs.kwargs.get("enabled_toolsets")
             assert sorted(toolsets) == ["terminal", "web"]
+
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_create_agent_merges_extra_tools(self):
+        """extra_tools are appended to agent.tools and their names added to valid_tool_names."""
+        from gateway.platforms.api_server import APIServerAdapter
+        from gateway.config import PlatformConfig
+
+        adapter = APIServerAdapter(PlatformConfig())
+
+        builtin_tool = {"type": "function", "function": {"name": "terminal", "description": "run terminal"}}
+        desktop_tool = {"type": "function", "function": {"name": "upsert_client", "description": "upsert a client"}}
+
+        mock_agent = MagicMock()
+        mock_agent.tools = [builtin_tool]
+        mock_agent.valid_tool_names = {"terminal"}
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
+             patch("gateway.run._resolve_gateway_model") as mock_model, \
+             patch("gateway.run._load_gateway_config") as mock_config, \
+             patch("run_agent.AIAgent", return_value=mock_agent):
+
+            mock_kwargs.return_value = {"api_key": "test-key", "base_url": None,
+                                        "provider": None, "api_mode": None,
+                                        "command": None, "args": []}
+            mock_model.return_value = "test/model"
+            mock_config.return_value = {}
+
+            agent = adapter._create_agent(extra_tools=[desktop_tool])
+
+        tool_names = [t["function"]["name"] for t in agent.tools]
+        assert "terminal" in tool_names
+        assert "upsert_client" in tool_names
+        assert "upsert_client" in agent.valid_tool_names
+
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_create_agent_extra_tools_does_not_replace_builtins(self):
+        """A caller-supplied tool with the same name as a built-in is silently skipped."""
+        from gateway.platforms.api_server import APIServerAdapter
+        from gateway.config import PlatformConfig
+
+        adapter = APIServerAdapter(PlatformConfig())
+
+        builtin_tool = {"type": "function", "function": {"name": "terminal", "description": "builtin terminal"}}
+        caller_tool = {"type": "function", "function": {"name": "terminal", "description": "caller override"}}
+
+        mock_agent = MagicMock()
+        mock_agent.tools = [builtin_tool]
+        mock_agent.valid_tool_names = {"terminal"}
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
+             patch("gateway.run._resolve_gateway_model") as mock_model, \
+             patch("gateway.run._load_gateway_config") as mock_config, \
+             patch("run_agent.AIAgent", return_value=mock_agent):
+
+            mock_kwargs.return_value = {"api_key": "test-key", "base_url": None,
+                                        "provider": None, "api_mode": None,
+                                        "command": None, "args": []}
+            mock_model.return_value = "test/model"
+            mock_config.return_value = {}
+
+            agent = adapter._create_agent(extra_tools=[caller_tool])
+
+        # Still only one "terminal" tool; the caller version must not overwrite
+        terminal_tools = [t for t in agent.tools if t["function"]["name"] == "terminal"]
+        assert len(terminal_tools) == 1
+        assert terminal_tools[0]["function"]["description"] == "builtin terminal"
+
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_create_agent_no_extra_tools_unchanged(self):
+        """Passing extra_tools=None leaves agent.tools untouched."""
+        from gateway.platforms.api_server import APIServerAdapter
+        from gateway.config import PlatformConfig
+
+        adapter = APIServerAdapter(PlatformConfig())
+        builtin_tool = {"type": "function", "function": {"name": "terminal", "description": "builtin"}}
+
+        mock_agent = MagicMock()
+        mock_agent.tools = [builtin_tool]
+        mock_agent.valid_tool_names = {"terminal"}
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
+             patch("gateway.run._resolve_gateway_model") as mock_model, \
+             patch("gateway.run._load_gateway_config") as mock_config, \
+             patch("run_agent.AIAgent", return_value=mock_agent):
+
+            mock_kwargs.return_value = {"api_key": "test-key", "base_url": None,
+                                        "provider": None, "api_mode": None,
+                                        "command": None, "args": []}
+            mock_model.return_value = "test/model"
+            mock_config.return_value = {}
+
+            agent = adapter._create_agent(extra_tools=None)
+
+        assert len(agent.tools) == 1
+        assert agent.tools[0]["function"]["name"] == "terminal"
