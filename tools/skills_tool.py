@@ -643,6 +643,15 @@ def _sort_skills(skills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(skills, key=lambda s: (s.get("category") or "", s["name"]))
 
 
+def _skills_list_item(skill: Dict[str, Any]) -> Dict[str, Any]:
+    """Project rich discovery metadata to the public skills_list contract."""
+    return {
+        "name": skill.get("name"),
+        "description": skill.get("description"),
+        "category": skill.get("category"),
+    }
+
+
 def _load_category_description(category_dir: Path) -> Optional[str]:
     """
     Load category description from DESCRIPTION.md if it exists.
@@ -742,7 +751,7 @@ def skills_list(category: str = None, task_id: str = None) -> str:
         return json.dumps(
             {
                 "success": True,
-                "skills": all_skills,
+                "skills": [_skills_list_item(skill) for skill in all_skills],
                 "categories": categories,
                 "count": len(all_skills),
                 "hint": "Use skill_view(name) to see full content, tags, and linked files",
