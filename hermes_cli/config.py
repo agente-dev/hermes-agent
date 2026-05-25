@@ -1363,15 +1363,15 @@ DEFAULT_CONFIG = {
     # execute_code settings — controls the tool used for programmatic tool calls.
     "code_execution": {
         # Execution mode:
-        #   project (default) — scripts run in the session's working directory
+        #   strict (default) — scripts run in a temp staging directory with
+        #     hermes-agent's own python (sys.executable), keeping transient
+        #     helper files and scratch outputs out of the session workspace.
+        #   project          — scripts run in the session's working directory
         #     with the active virtualenv/conda env's python, so project deps
         #     (pandas, torch, project packages) and relative paths resolve.
-        #   strict            — scripts run in an isolated temp directory with
-        #     hermes-agent's own python (sys.executable). Maximum isolation
-        #     and reproducibility; project deps and relative paths won't work.
         # Env scrubbing (strips *_API_KEY, *_TOKEN, *_SECRET, ...) and the
         # tool whitelist apply identically in both modes.
-        "mode": "project",
+        "mode": "strict",
     },
 
     # Logging — controls file logging to ~/.hermes/logs/.

@@ -1452,15 +1452,15 @@ Configure the `execute_code` tool:
 
 ```yaml
 code_execution:
-  mode: project                # project (default) | strict
+  mode: strict                 # strict (default) | project
   timeout: 300                 # Max execution time in seconds
   max_tool_calls: 50           # Max tool calls within code execution
 ```
 
 **`mode`** controls the working directory and Python interpreter for scripts:
 
-- **`project`** (default) — scripts run in the session's working directory with the active virtualenv/conda env's python. Project deps (`pandas`, `torch`, project packages) and relative paths (`.env`, `./data.csv`) resolve naturally, matching what `terminal()` sees.
-- **`strict`** — scripts run in a temp staging directory with `sys.executable` (Hermes's own python). Maximum reproducibility, but project deps and relative paths won't resolve.
+- **`strict`** (default) — scripts run in a temp staging directory with `sys.executable` (Hermes's own python), keeping helper scripts and intermediate scratch files out of the session workspace. Use explicit absolute paths or Hermes file tools for real deliverables.
+- **`project`** — scripts run in the session's working directory with the active virtualenv/conda env's python. Project deps (`pandas`, `torch`, project packages) and relative paths (`.env`, `./data.csv`) resolve naturally, matching what `terminal()` sees.
 
 Environment scrubbing (strips `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_CREDENTIAL`, `*_PASSWD`, `*_AUTH`) and the tool whitelist apply identically in both modes — switching mode does not change the security posture.
 
