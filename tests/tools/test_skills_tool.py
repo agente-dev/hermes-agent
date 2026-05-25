@@ -305,6 +305,28 @@ class TestSkillsList:
         result = json.loads(raw)
         assert result["count"] == 2
 
+    def test_lists_skills_projects_minimal_tool_contract(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "aveeor-tama",
+                frontmatter_extra="metadata:\n  pack: aveeor-tama\n",
+                category="packs",
+            )
+            raw = skills_list()
+
+        result = json.loads(raw)
+        assert result["skills"] == [
+            {
+                "name": "aveeor-tama",
+                "description": "Description for aveeor-tama.",
+                "category": "packs",
+            }
+        ]
+        assert "path" not in result["skills"][0]
+        assert "source" not in result["skills"][0]
+        assert "frontmatter" not in result["skills"][0]
+
     def test_category_filter(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(tmp_path, "skill-a", category="devops")

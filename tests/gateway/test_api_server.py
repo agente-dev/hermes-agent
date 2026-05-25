@@ -356,6 +356,7 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/health/detailed", adapter._handle_health_detailed)
     app.router.add_get("/v1/health", adapter._handle_health)
     app.router.add_get("/v1/models", adapter._handle_models)
+    app.router.add_get("/v1/skills", adapter._handle_skills)
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
     app.router.add_post("/v1/responses", adapter._handle_responses)
@@ -567,6 +568,94 @@ class TestModelsEndpoint:
                 headers={"Authorization": "Bearer sk-secret"},
             )
             assert resp.status == 200
+
+
+# ---------------------------------------------------------------------------
+# /v1/skills endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestSkillsEndpoint:
+    @pytest.mark.asyncio
+    async def test_skills_returns_discovery_payload(self, adapter):
+        app = _create_app(adapter)
+        discovered = [
+            {
+                "name": "aveeor-tama",
+                "description": "Workspace pack skill",
+                "path": "/workspace/packs/aveeor-tama/SKILL.md",
+                "source": "external",
+                "category": "packs",
+                "frontmatter": {
+                    "name": "aveeor-tama",
+                    "description": "Workspace pack skill",
+                    "metadata": {"pack": "aveeor-tama"},
+                },
+            }
+        ]
+        with patch("tools.skills_tool._find_all_skills", return_value=discovered) as mock_find:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.get("/v1/skills")
+                assert resp.status == 200
+                data = await resp.json()
+
+        assert data == {"skills": discovered}
+        mock_find.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_skills_requires_auth_when_key_configured(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        with patch("tools.skills_tool._find_all_skills", return_value=[]):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.get("/v1/skills")
+                assert resp.status == 401
+
+                authed = await cli.get(
+                    "/v1/skills",
+                    headers={"Authorization": "Bearer sk-secret"},
+                )
+                assert authed.status == 200
+                assert await authed.json() == {"skills": []}
+
+    @pytest.mark.asyncio
+    async def test_skills_uses_five_second_in_process_cache(self, adapter, monkeypatch):
+        import gateway.platforms.api_server as api_server_mod
+
+        app = _create_app(adapter)
+        now = {"value": 100.0}
+        calls = {"count": 0}
+
+        def fake_find_all_skills():
+            calls["count"] += 1
+            return [
+                {
+                    "name": f"skill-{calls['count']}",
+                    "description": "",
+                    "path": f"/tmp/skill-{calls['count']}/SKILL.md",
+                    "source": "local",
+                    "category": None,
+                    "frontmatter": {"name": f"skill-{calls['count']}"},
+                }
+            ]
+
+        monkeypatch.setattr(api_server_mod.time, "monotonic", lambda: now["value"])
+        with patch("tools.skills_tool._find_all_skills", side_effect=fake_find_all_skills):
+            async with TestClient(TestServer(app)) as cli:
+                first = await cli.get("/v1/skills")
+                assert first.status == 200
+                assert (await first.json())["skills"][0]["name"] == "skill-1"
+
+                now["value"] = 104.9
+                second = await cli.get("/v1/skills")
+                assert second.status == 200
+                assert (await second.json())["skills"][0]["name"] == "skill-1"
+
+                now["value"] = 105.1
+                third = await cli.get("/v1/skills")
+                assert third.status == 200
+                assert (await third.json())["skills"][0]["name"] == "skill-2"
+
+        assert calls["count"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -3061,4 +3150,3 @@ class TestSessionKeyHeader:
             assert resp.status == 200
             data = await resp.json()
             assert data["features"]["session_key_header"] == "X-Hermes-Session-Key"
-
