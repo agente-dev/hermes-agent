@@ -831,6 +831,7 @@ stt:
 # The execute_code tool runs Python scripts that call Hermes tools via RPC.
 # Intermediate tool results stay out of the LLM's context window.
 code_execution:
+  mode: strict        # strict (default) | project
   timeout: 300         # Max seconds per script before kill (default: 300 = 5 min)
   max_tool_calls: 50   # Max RPC tool calls per execution (default: 50)
 

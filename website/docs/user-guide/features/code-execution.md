@@ -132,17 +132,17 @@ print(json.dumps(report, indent=2))
 
 | Mode | Working directory | Python interpreter |
 |------|-------------------|--------------------|
-| **`project`** (default) | The session's working directory (same as `terminal()`) | Active `VIRTUAL_ENV` / `CONDA_PREFIX` python, falling back to Hermes's own python |
-| `strict` | A temp staging directory isolated from the user's project | `sys.executable` (Hermes's own python) |
+| **`strict`** (default) | A temp staging directory outside the session workspace | `sys.executable` (Hermes's own python) |
+| `project` | The session's working directory (same as `terminal()`) | Active `VIRTUAL_ENV` / `CONDA_PREFIX` python, falling back to Hermes's own python |
 
-**When to leave it on `project`:** you want `import pandas`, `from my_project import foo`, or relative paths like `open(".env")` to work the same way they do in `terminal()`. This is almost always what you want.
+**When to leave it on `strict`:** you want one-shot helper scripts and intermediate scratch files to stay out of the session workspace. Write real deliverables with explicit absolute paths or Hermes file tools.
 
-**When to flip to `strict`:** you need maximum reproducibility — you want the same interpreter every session regardless of which venv the user activated, and you want scripts quarantined from the project tree (no risk of accidentally reading project files through a relative path).
+**When to flip to `project`:** you intentionally want `import pandas`, `from my_project import foo`, or relative paths like `open(".env")` to work the same way they do in `terminal()`.
 
 ```yaml
 # ~/.hermes/config.yaml
 code_execution:
-  mode: project   # or "strict"
+  mode: strict   # or "project"
 ```
 
 Fallback behavior in `project` mode: if `VIRTUAL_ENV` / `CONDA_PREFIX` is unset, broken, or points at a Python older than 3.8, the resolver falls back cleanly to `sys.executable` — it never leaves the agent without a working interpreter.
@@ -169,7 +169,7 @@ All limits are configurable via `config.yaml`:
 ```yaml
 # In ~/.hermes/config.yaml
 code_execution:
-  mode: project      # project (default) | strict
+  mode: strict       # strict (default) | project
   timeout: 300       # Max seconds per script (default: 300)
   max_tool_calls: 50 # Max tool calls per execution (default: 50)
 ```
@@ -219,7 +219,7 @@ terminal:
 
 See the [Security guide](/docs/user-guide/security#environment-variable-passthrough) for full details.
 
-Hermes always writes the script and the auto-generated `hermes_tools.py` RPC stub into a temp staging directory that is cleaned up after execution. In `strict` mode the script also *runs* there; in `project` mode it runs in the session's working directory (the staging directory stays on `PYTHONPATH` so imports still resolve). The child process runs in its own process group so it can be cleanly killed on timeout or interruption.
+Hermes always writes the script and the auto-generated `hermes_tools.py` RPC stub into a temp staging directory that is cleaned up after execution. In the default `strict` mode the script also *runs* there, so relative helper files and scratch outputs do not land in the session workspace. In explicit `project` mode it runs in the session's working directory; the staging directory stays on `PYTHONPATH` so imports still resolve. The child process runs in its own process group so it can be cleanly killed on timeout or interruption.
 
 ## execute_code vs terminal
 
