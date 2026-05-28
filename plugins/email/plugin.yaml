@@ -1,0 +1,14 @@
+name: email
+version: 0.1.0
+description: "Gmail connector via gws CLI — list, read, draft, send, and mark emails. OAuth and token storage are owned entirely by the gws binary."
+author: agente.dev
+kind: standalone
+platforms:
+  - linux
+  - macos
+provides_tools:
+  - list_emails
+  - read_email
+  - draft_reply
+  - send_email
+  - mark_email
