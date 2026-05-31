@@ -4,8 +4,9 @@ Covers:
 
   * Binary resolution via AGENTE_GWS_BIN env / PATH fallback.
   * Clear ``gws not bundled`` error when neither is set.
-  * Each tool shells the expected ``gws gmail <subcmd> --json`` argv.
+  * Each tool shells the expected ``gws gmail users <subcmd> --params`` argv.
   * Stdout JSON is parsed and returned as a dict/list.
+  * TimeoutExpired returns {"error": "gws_timeout"} dict.
   * Plugin __init__ exposes 5 tools through the register() context shim.
 """
 
@@ -80,15 +81,25 @@ class TestListEmails:
     def test_shells_expected_argv(self, email_plugin):
         payload = {"messages": [{"id": "abc", "subject": "Hi"}]}
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed(json.dumps(payload))) as run:
-            out = email_plugin.list_emails(folder="INBOX", max=10)
+            out = email_plugin.list_emails(folder="INBOX", limit=10)
         argv = run.call_args[0][0]
-        assert argv == ["/fake/bin/gws", "gmail", "messages", "list", "--folder", "INBOX", "--max", "10", "--json"]
+        expected_params = json.dumps({"userId": "me", "maxResults": 10, "labelIds": ["INBOX"]})
+        assert argv == ["/fake/bin/gws", "gmail", "users", "messages", "list", "--params", expected_params]
         assert out == payload
 
     def test_default_folder_is_inbox(self, email_plugin):
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("{}")) as run:
             email_plugin.list_emails()
-        assert "INBOX" in run.call_args[0][0]
+        argv_str = str(run.call_args[0][0])
+        assert "INBOX" in argv_str
+
+    def test_since_adds_query_param(self, email_plugin):
+        with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("{}")) as run:
+            email_plugin.list_emails(since="2024-01-01")
+        argv = run.call_args[0][0]
+        params_str = argv[argv.index("--params") + 1]
+        params = json.loads(params_str)
+        assert params["q"] == "after:2024-01-01"
 
 
 class TestReadEmail:
@@ -97,7 +108,8 @@ class TestReadEmail:
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed(json.dumps(payload, ensure_ascii=False))) as run:
             out = email_plugin.read_email(message_id="abc")
         argv = run.call_args[0][0]
-        assert argv == ["/fake/bin/gws", "gmail", "messages", "get", "abc", "--json", "--raw"]
+        expected_params = json.dumps({"userId": "me", "id": "abc"})
+        assert argv == ["/fake/bin/gws", "gmail", "users", "messages", "get", "--raw", "--params", expected_params]
         assert out["body"] == "שלום"
 
 
@@ -106,7 +118,15 @@ class TestDraftReply:
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed('{"draft_id": "d1"}')) as run:
             out = email_plugin.draft_reply(message_id="m1", body="thanks")
         argv = run.call_args[0][0]
-        assert argv == ["/fake/bin/gws", "gmail", "drafts", "create", "--in-reply-to", "m1", "--body", "thanks", "--json"]
+        assert argv[0] == "/fake/bin/gws"
+        assert argv[1:4] == ["gmail", "users", "drafts"]
+        assert argv[4] == "create"
+        assert "--params" in argv
+        params = json.loads(argv[argv.index("--params") + 1])
+        assert params["userId"] == "me"
+        assert "--body" in argv
+        body = json.loads(argv[argv.index("--body") + 1])
+        assert body["message"]["threadId"] == "m1"
         assert out == {"draft_id": "d1"}
 
 
@@ -115,30 +135,46 @@ class TestSendEmail:
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed('{"ok": true}')) as run:
             email_plugin.send_email(to="a@b.co", subject="s", body="b")
         argv = run.call_args[0][0]
-        assert argv == ["/fake/bin/gws", "gmail", "messages", "send", "--to", "a@b.co", "--subject", "s", "--body", "b", "--json"]
+        assert argv[0] == "/fake/bin/gws"
+        assert argv[1:5] == ["gmail", "users", "messages", "send"]
+        assert "--params" in argv
+        params = json.loads(argv[argv.index("--params") + 1])
+        assert params["userId"] == "me"
+        assert "--body" in argv
+        message_body = json.loads(argv[argv.index("--body") + 1])
+        assert "raw" in message_body
 
 
 class TestMarkEmail:
-    def test_add_label(self, email_plugin):
+    def test_mark_read_removes_unread(self, email_plugin):
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("{}")) as run:
-            email_plugin.mark_email(message_id="m1", add_label="STARRED")
+            email_plugin.mark_email(message_id="m1", read=True)
         argv = run.call_args[0][0]
-        assert argv == ["/fake/bin/gws", "gmail", "messages", "modify", "m1", "--json", "--add-label", "STARRED"]
+        assert argv[1:5] == ["gmail", "users", "messages", "modify"]
+        body = json.loads(argv[argv.index("--body") + 1])
+        assert body["removeLabelIds"] == ["UNREAD"]
 
-    def test_remove_label(self, email_plugin):
+    def test_mark_unread_adds_unread(self, email_plugin):
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("{}")) as run:
-            email_plugin.mark_email(message_id="m1", remove_label="UNREAD")
+            email_plugin.mark_email(message_id="m1", read=False)
         argv = run.call_args[0][0]
-        assert argv == ["/fake/bin/gws", "gmail", "messages", "modify", "m1", "--json", "--remove-label", "UNREAD"]
+        body = json.loads(argv[argv.index("--body") + 1])
+        assert body["addLabelIds"] == ["UNREAD"]
 
 
 class TestErrorPropagation:
-    def test_nonzero_exit_raises(self, email_plugin):
+    def test_nonzero_exit_returns_error_dict(self, email_plugin):
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("", returncode=2, stderr="boom")):
-            with pytest.raises(RuntimeError) as exc_info:
-                email_plugin.list_emails()
-            assert "exit 2" in str(exc_info.value)
-            assert "boom" in str(exc_info.value)
+            result = email_plugin.list_emails()
+        assert result["error"] == "gws_error"
+        assert result["returncode"] == 2
+        assert "boom" in result["stderr"]
+
+    def test_timeout_returns_timeout_dict(self, email_plugin):
+        with patch("plugins.email.email_plugin.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gws", timeout=30)):
+            result = email_plugin.list_emails()
+        assert result["error"] == "gws_timeout"
+        assert result["timeout"] == 30
 
     def test_missing_binary_surfaces_unavailable(self, monkeypatch):
         monkeypatch.delenv("AGENTE_GWS_BIN", raising=False)
