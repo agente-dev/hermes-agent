@@ -49,6 +49,11 @@ dependencies = [
   # (which is a silent killer on Windows — see CONTRIBUTING.md) and
   # `os.killpg` (which doesn't exist on Windows).
   "psutil>=5.9.0,<8",
+  # JSON Schema validation for execute_skill input/output schema enforcement.
+  # tools/skill_executor.py uses Draft202012Validator; without this declaration
+  # the library is not guaranteed to be present and schema validation silently
+  # degrades to executor_unavailable.  Draft 2020-12 support landed in v4.0.
+  "jsonschema>=4.0.0,<5",
 ]
 
 [project.optional-dependencies]
