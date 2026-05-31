@@ -19,10 +19,12 @@ caller can surface a Connectors-UI prompt.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
 import subprocess
+from email.mime.text import MIMEText
 from typing import Any
 
 _GWS_TIMEOUT = 30
@@ -69,6 +71,13 @@ def _gws_json(args: list[str]) -> Any:
         return {"error": "gws_bad_json", "raw": result.stdout[:500]}
 
 
+def _encode_text_message(body: str, headers: dict[str, str] | None = None) -> str:
+    msg = MIMEText(body, _charset="utf-8")
+    for name, value in (headers or {}).items():
+        msg[name] = value
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+
 def list_emails(folder: str = "INBOX", since: str | None = None, limit: int = 10) -> list[dict]:
     """Return the most recent messages in ``folder`` (default INBOX)."""
     params: dict[str, Any] = {"userId": "me", "maxResults": limit, "labelIds": [folder]}
@@ -85,25 +94,21 @@ def read_email(message_id: str) -> dict:
 
 def draft_reply(message_id: str, body: str) -> dict:
     """Create a Gmail draft replying to ``message_id`` with ``body``."""
-    import base64
-    import email.mime.text
-    msg = email.mime.text.MIMEText(body)
-    msg["In-Reply-To"] = message_id
-    msg["References"] = message_id
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     params = {"userId": "me"}
+    raw = _encode_text_message(
+        body,
+        {
+            "In-Reply-To": message_id,
+            "References": message_id,
+        },
+    )
     draft_body = {"message": {"threadId": message_id, "raw": raw}}
     return _gws_json(["gmail", "users", "drafts", "create", "--params", json.dumps(params), "--body", json.dumps(draft_body)])
 
 
 def send_email(to: str, subject: str, body: str) -> dict:
     """Send a new email."""
-    import base64
-    import email.mime.text
-    msg = email.mime.text.MIMEText(body)
-    msg["to"] = to
-    msg["subject"] = subject
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    raw = _encode_text_message(body, {"to": to, "subject": subject})
     params = {"userId": "me"}
     message_body = {"raw": raw}
     return _gws_json(["gmail", "users", "messages", "send", "--params", json.dumps(params), "--body", json.dumps(message_body)])

@@ -13,11 +13,14 @@ Covers:
 from __future__ import annotations
 
 import importlib
+import base64
 import json
 import subprocess
 import sys
 import types
+from email import message_from_bytes
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -115,7 +118,6 @@ class TestReadEmail:
 
 class TestDraftReply:
     def test_argv(self, email_plugin):
-        import base64
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed('{"draft_id": "d1"}')) as run:
             out = email_plugin.draft_reply(message_id="m1", body="thanks")
         argv = run.call_args[0][0]
@@ -128,10 +130,10 @@ class TestDraftReply:
         assert "--body" in argv
         body = json.loads(argv[argv.index("--body") + 1])
         assert body["message"]["threadId"] == "m1"
-        raw = body["message"]["raw"]
-        # raw must be base64url-encoded, not plain text
-        decoded = base64.urlsafe_b64decode(raw + "==").decode()
-        assert "thanks" in decoded
+        raw = base64.urlsafe_b64decode(body["message"]["raw"].encode())
+        msg = message_from_bytes(raw)
+        assert msg.get_payload(decode=True) == b"thanks"
+        assert b"In-Reply-To: m1" in raw
         assert out == {"draft_id": "d1"}
 
 
@@ -166,6 +168,14 @@ class TestMarkEmail:
         body = json.loads(argv[argv.index("--body") + 1])
         assert body["removeLabelIds"] == ["UNREAD"]
 
+    def test_label_delta_matches_registered_tool_schema(self, email_plugin):
+        with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("{}")) as run:
+            email_plugin.mark_email(message_id="m1", add_label="STARRED", remove_label="INBOX")
+        argv = run.call_args[0][0]
+        body = json.loads(argv[argv.index("--body") + 1])
+        assert body["addLabelIds"] == ["STARRED"]
+        assert body["removeLabelIds"] == ["INBOX"]
+
 
 class TestErrorPropagation:
     def test_nonzero_exit_returns_error_dict(self, email_plugin):
@@ -180,6 +190,12 @@ class TestErrorPropagation:
             result = email_plugin.list_emails()
         assert result["error"] == "gws_timeout"
         assert result["timeout"] == 30
+
+    def test_bad_json_returns_error_dict(self, email_plugin):
+        with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("not json")):
+            result = email_plugin.list_emails()
+        assert result["error"] == "gws_bad_json"
+        assert result["raw"] == "not json"
 
     def test_missing_binary_surfaces_unavailable(self, monkeypatch):
         monkeypatch.delenv("AGENTE_GWS_BIN", raising=False)
@@ -221,6 +237,7 @@ def test_register_exposes_five_tools(monkeypatch):
     if "plugins.email" in sys.modules:
         del sys.modules["plugins.email"]
     pkg = importlib.import_module("plugins.email")
+    schemas = importlib.import_module("plugins.email.schemas")
 
     ctx = _FakeCtx()
     pkg.register(ctx)
@@ -230,3 +247,8 @@ def test_register_exposes_five_tools(monkeypatch):
     for t in ctx.tools:
         assert t["toolset"] == "email"
         assert "parameters" in t["schema"]
+    mark_schema = cast(dict[str, Any], schemas.MARK_EMAIL_SCHEMA)
+    params = cast(dict[str, Any], mark_schema["parameters"])
+    props = cast(dict[str, Any], params["properties"])
+    add_label = cast(dict[str, Any], props["add_label"])
+    assert add_label["type"] == "string"
