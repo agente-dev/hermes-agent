@@ -3279,7 +3279,13 @@ def unified_search(query: str, sources: List[SkillSource],
 
 
 def _load_skill_frontmatter(skill_id: str) -> Optional[Dict[str, Any]]:
-    """Resolve ``skill_id`` to its parsed SKILL.md frontmatter, or None."""
+    """Resolve ``skill_id`` to its parsed SKILL.md frontmatter, or None.
+
+    Accepts bare names ("summarise-doc") and qualified plugin-style names
+    ("agente-desktop:summarise-doc").  For qualified IDs the namespace
+    prefix is stripped before matching against the local skills index so
+    callers can pass either form without knowing the index structure.
+    """
     try:
         from tools.skills_tool import _find_all_skills
     except Exception:  # pragma: no cover - defensive import guard
@@ -3289,8 +3295,13 @@ def _load_skill_frontmatter(skill_id: str) -> Optional[Dict[str, Any]]:
     if not target:
         return None
 
+    # Strip "namespace:" prefix from qualified IDs — the local skills index
+    # stores bare names only, and plugin-routed skills share the same SKILL.md
+    # frontmatter schema.
+    bare = target.split(":", 1)[-1] if ":" in target else target
+
     for skill in _find_all_skills():
-        if skill.get("name") == target:
+        if skill.get("name") in (target, bare):
             fm = skill.get("frontmatter")
             if isinstance(fm, dict):
                 return fm

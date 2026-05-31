@@ -1000,7 +1000,9 @@ class APIServerAdapter(BasePlatformAdapter):
         from tools.skill_executor import execute_skill
 
         # Hard cap on body size before parsing — protects the synchronous
-        # worker from a runaway payload.
+        # worker from a runaway payload.  Returns 400 (invalid_request) to
+        # stay consistent with the documented HTTP status contract; 413 is
+        # semantically correct but not part of the stable error vocabulary.
         if request.content_length is not None and request.content_length > MAX_INPUT_BYTES:
             resp = AgentExecuteResponse(
                 status="error",
@@ -1012,7 +1014,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     )
                 ],
             )
-            return web.json_response(resp.model_dump(mode="json"), status=413)
+            return web.json_response(resp.model_dump(mode="json"), status=400)
 
         try:
             body = await request.json()
