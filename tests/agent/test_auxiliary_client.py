@@ -666,7 +666,8 @@ class TestAuxiliaryPoolAwareness:
             client, model = _try_nous()
 
         assert client is not None
-        assert model == "google/gemini-3-flash-preview"
+        # Head-of-pool from the Portal's free-tier recommendation.
+        assert model == "stepfun/step-3.7-flash:free"
         assert mock_openai.call_args.kwargs["api_key"] == "pooled-agent-key"
         assert mock_openai.call_args.kwargs["base_url"] == "https://inference.pool.example/v1"
 

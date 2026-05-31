@@ -359,6 +359,7 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/v1/skills", adapter._handle_skills)
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
+    app.router.add_post("/v1/hermes/chat", adapter._handle_hermes_chat)
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
@@ -1268,6 +1269,149 @@ class TestChatCompletionsEndpoint:
                     session_ids.append(mock_run.call_args.kwargs["session_id"])
 
         assert session_ids[0] != session_ids[1]
+
+
+class TestHermesChatEndpoint:
+    @pytest.mark.asyncio
+    async def test_requires_auth_when_key_configured(self, auth_adapter):
+        auth_adapter._api_key = "sk-secret"
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/hermes/chat",
+                json={
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                    "toolsets": ["web"],
+                },
+            )
+            assert resp.status == 401
+
+    @pytest.mark.asyncio
+    async def test_invalid_toolsets_returns_400(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/hermes/chat",
+                json={
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                    "toolsets": "web",
+                },
+            )
+            assert resp.status == 400
+            data = await resp.json()
+            assert "toolsets" in data["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_request_toolsets_and_body_session_id_reach_agent(self, auth_adapter):
+        auth_adapter._api_key = "sk-secret"
+        mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
+        mock_db = MagicMock()
+        mock_db.get_messages_as_conversation.return_value = []
+        auth_adapter._session_db = mock_db
+
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+                resp = await cli.post(
+                    "/v1/hermes/chat",
+                    headers={"Authorization": "Bearer sk-secret"},
+                    json={
+                        "model": "hermes-agent",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "stream": True,
+                        "session_id": "desktop-session-1",
+                        "toolsets": ["web", "agente-desktop", "web"],
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+
+            call_kwargs = mock_run.call_args.kwargs
+            assert call_kwargs["enabled_toolsets_override"] == ["web", "agente-desktop"]
+            assert call_kwargs["session_id"] == "desktop-session-1"
+            assert resp.headers.get("X-Hermes-Session-Id") == "desktop-session-1"
+            assert "[DONE]" in body
+
+    @pytest.mark.asyncio
+    async def test_stream_envelope_matches_chat_completions(self, adapter):
+        import asyncio
+
+        def _stream_signature(body: str):
+            signature = []
+            for block in body.split("\n\n"):
+                event_type = "message"
+                data_lines = []
+                for line in block.splitlines():
+                    if line.startswith("event: "):
+                        event_type = line[len("event: "):]
+                    elif line.startswith("data: "):
+                        data_lines.append(line[len("data: "):])
+                if not data_lines:
+                    continue
+                data = "\n".join(data_lines)
+                if data == "[DONE]":
+                    signature.append((event_type, "done"))
+                    continue
+                payload = json.loads(data)
+                if event_type == "hermes.tool.progress":
+                    signature.append((event_type, payload.get("status"), payload.get("toolCallId")))
+                    continue
+                choice = payload["choices"][0]
+                delta = choice.get("delta", {})
+                signature.append((
+                    event_type,
+                    tuple(sorted(delta.keys())),
+                    choice.get("finish_reason"),
+                ))
+            return signature
+
+        async def _mock_run_agent(**kwargs):
+            cb = kwargs.get("stream_delta_callback")
+            ts_cb = kwargs.get("tool_start_callback")
+            tc_cb = kwargs.get("tool_complete_callback")
+            if ts_cb:
+                ts_cb("call_terminal_1", "terminal", {"command": "pwd"})
+            if tc_cb:
+                tc_cb("call_terminal_1", "terminal", {"command": "pwd"}, "/tmp")
+            if cb:
+                await asyncio.sleep(0.01)
+                cb("Hello!")
+            return (
+                {"final_response": "Hello!", "messages": [], "api_calls": 1},
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                chat_resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "stream": True,
+                    },
+                )
+                hermes_resp = await cli.post(
+                    "/v1/hermes/chat",
+                    json={
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "stream": True,
+                        "toolsets": ["web"],
+                    },
+                )
+
+                assert chat_resp.status == 200
+                assert hermes_resp.status == 200
+                chat_body = await chat_resp.text()
+                hermes_body = await hermes_resp.text()
+
+        assert _stream_signature(hermes_body) == _stream_signature(chat_body)
 
 
 # ---------------------------------------------------------------------------
