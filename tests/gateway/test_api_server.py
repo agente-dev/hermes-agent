@@ -357,6 +357,7 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/v1/health", adapter._handle_health)
     app.router.add_get("/v1/models", adapter._handle_models)
     app.router.add_get("/v1/skills", adapter._handle_skills)
+    app.router.add_post("/v1/agent/execute_skill", adapter._handle_execute_skill)
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
     app.router.add_post("/v1/hermes/chat", adapter._handle_hermes_chat)

@@ -977,6 +977,116 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=500,
             )
 
+    async def _handle_execute_skill(self, request: "web.Request") -> "web.Response":
+        """POST /v1/agent/execute_skill — synchronous structured skill run.
+
+        Wave-A primitive: validate the request against the skill's input
+        schema (if any), execute it under a bounded timeout, and validate
+        the result against the output schema (if any).  Every failure
+        path returns ``AgentExecuteResponse`` with ``status="error"`` and
+        a structured ``errors`` list — the desktop UI branches on the
+        stable ``code`` field instead of parsing free-form messages.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err is not None:
+            return auth_err
+
+        # Lazy import — the schemas / executor packages are not needed by
+        # callers that never hit this endpoint, and keeping the import
+        # local avoids dragging pydantic-v2 into module-level cycles.
+        from pydantic import ValidationError
+
+        from schemas.agent_execute import (
+            AgentExecuteRequest,
+            AgentExecuteResponse,
+            ExecuteError,
+            MAX_INPUT_BYTES,
+        )
+        from tools.skill_executor import execute_skill
+
+        # Hard cap on body size before parsing — protects the synchronous
+        # worker from a runaway payload.  Returns 400 (invalid_request) to
+        # stay consistent with the documented HTTP status contract; 413 is
+        # semantically correct but not part of the stable error vocabulary.
+        if request.content_length is not None and request.content_length > MAX_INPUT_BYTES:
+            resp = AgentExecuteResponse(
+                status="error",
+                skill_id="",
+                errors=[
+                    ExecuteError(
+                        code="invalid_request",
+                        message=f"Request body exceeds {MAX_INPUT_BYTES} bytes.",
+                    )
+                ],
+            )
+            return web.json_response(resp.model_dump(mode="json"), status=400)
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            resp = AgentExecuteResponse(
+                status="error",
+                skill_id="",
+                errors=[
+                    ExecuteError(
+                        code="invalid_request",
+                        message="Request body is not valid JSON.",
+                    )
+                ],
+            )
+            return web.json_response(resp.model_dump(mode="json"), status=400)
+
+        try:
+            payload = AgentExecuteRequest.model_validate(body)
+        except ValidationError as exc:
+            errors = [
+                ExecuteError(
+                    code="invalid_request",
+                    message=err.get("msg", "validation error"),
+                    path=".".join(str(p) for p in err.get("loc", ())) or None,
+                )
+                for err in exc.errors()
+            ]
+            resp = AgentExecuteResponse(
+                status="error",
+                skill_id=str(body.get("skill_id", "")) if isinstance(body, dict) else "",
+                errors=errors,
+            )
+            return web.json_response(resp.model_dump(mode="json"), status=400)
+
+        try:
+            response = await execute_skill(payload)
+        except Exception as exc:  # noqa: BLE001 — final safety net
+            logger.exception("[api_server] execute_skill crashed: %s", exc)
+            resp = AgentExecuteResponse(
+                status="error",
+                skill_id=payload.skill_id,
+                errors=[
+                    ExecuteError(
+                        code="execution_failed",
+                        message=f"Internal executor error: {exc}",
+                    )
+                ],
+            )
+            return web.json_response(resp.model_dump(mode="json"), status=500)
+
+        # Map structured error codes to HTTP status — keeps the surface
+        # legible to vanilla HTTP clients while preserving the JSON body.
+        if response.status == "ok":
+            status_code = 200
+        else:
+            first_code = response.errors[0].code if response.errors else "execution_failed"
+            status_code = {
+                "skill_not_found": 404,
+                "invalid_request": 400,
+                "schema_violation": 422,
+                "timeout": 504,
+                "executor_unavailable": 503,
+                "execution_failed": 500,
+            }.get(first_code, 500)
+
+        return web.json_response(response.model_dump(mode="json"), status=status_code)
+
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         """GET /v1/capabilities — advertise the stable API surface.
 
@@ -1019,6 +1129,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "run_stop": True,
                 "run_approval_response": True,
                 "skill_discovery": True,
+                "skill_execute_sync": True,
                 "tool_progress_events": True,
                 "approval_events": True,
                 "session_continuity_header": "X-Hermes-Session-Id",
@@ -1030,6 +1141,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "health_detailed": {"method": "GET", "path": "/health/detailed"},
                 "models": {"method": "GET", "path": "/v1/models"},
                 "skills": {"method": "GET", "path": "/v1/skills"},
+                "execute_skill": {"method": "POST", "path": "/v1/agent/execute_skill"},
                 "chat_completions": {"method": "POST", "path": "/v1/chat/completions"},
                 "hermes_chat": {"method": "POST", "path": "/v1/hermes/chat"},
                 "responses": {"method": "POST", "path": "/v1/responses"},
@@ -3638,7 +3750,37 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/health", self._handle_health)
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_get("/v1/skills", self._handle_skills)
+            self._app.router.add_post("/v1/agent/execute_skill", self._handle_execute_skill)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
+
+            # Wire the default agent runner for /v1/agent/execute_skill.
+            # This must happen after the router is set up so the adapter
+            # (self) is fully initialised, but before the server begins
+            # accepting requests.  The runner creates a fresh AIAgent per
+            # call and surfaces the agent's final text response as the
+            # ``result`` key in the outputs dict.
+            from tools.skill_executor import register_default_runner
+
+            async def _default_skill_runner(
+                skill_id: str,
+                inputs: "Dict[str, Any]",
+                context_budget_tokens: int,
+                timeout_seconds: float,
+            ) -> "Dict[str, Any]":
+                import json as _json
+
+                inputs_repr = _json.dumps(inputs, ensure_ascii=False) if inputs else "{}"
+                user_message = (
+                    f"Run the skill '{skill_id}' with the following inputs:\n{inputs_repr}"
+                )
+                result_dict, _usage = await self._run_agent(
+                    user_message=user_message,
+                    conversation_history=[],
+                )
+                final_text = result_dict.get("final_message", "") or result_dict.get("response", "") or ""
+                return {"result": final_text}
+
+            register_default_runner(_default_skill_runner)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/hermes/chat", self._handle_hermes_chat)
             self._app.router.add_post("/v1/responses", self._handle_responses)
