@@ -1221,7 +1221,8 @@ def execute_code(
             child_env["HOME"] = _profile_home
 
         # Resolve interpreter + CWD based on execute_code mode.
-        #   - strict : today's behavior (sys.executable + tmpdir CWD).
+        #   - strict : default behavior (sys.executable + tmpdir CWD) keeps
+        #              transient helper files out of the session workspace.
         #   - project: user's venv python + session's working directory, so
         #              project deps like pandas and user files resolve.
         # Env scrubbing and tool whitelist apply identically in both modes.
@@ -1525,23 +1526,23 @@ def _load_config() -> dict:
 # Valid values for code_execution.mode. Kept as a module constant so tests
 # and the config layer can reference the canonical set.
 EXECUTION_MODES = ("project", "strict")
-DEFAULT_EXECUTION_MODE = "project"
+DEFAULT_EXECUTION_MODE = "strict"
 
 
 def _get_execution_mode() -> str:
     """Return the active execute_code mode — 'project' or 'strict'.
 
     Reads ``code_execution.mode`` from config.yaml; invalid values fall back
-    to ``DEFAULT_EXECUTION_MODE`` ('project') with a log warning.
+    to ``DEFAULT_EXECUTION_MODE`` ('strict') with a log warning.
 
     Mode semantics:
-      - ``project`` (default): scripts run in the session's working directory
-        with the active virtual environment's python, so project dependencies
-        (pandas, torch, project packages) and files resolve naturally.
-      - ``strict``: scripts run in an isolated temp directory with
-        ``sys.executable`` (hermes-agent's python). Reproducible and the
-        interpreter is guaranteed to work, but project deps and relative paths
-        won't resolve.
+      - ``strict`` (default): scripts run in a temp staging directory with
+        ``sys.executable`` (hermes-agent's python). Reproducible, keeps
+        transient scratch files out of the session workspace, and guarantees
+        the interpreter works.
+      - ``project``: scripts run in the session's working directory with the
+        active virtual environment's python, so project dependencies (pandas,
+        torch, project packages) and files resolve naturally.
 
     Env scrubbing and tool whitelist apply identically in both modes.
     """
@@ -1620,7 +1621,7 @@ def _resolve_child_python(mode: str) -> str:
 def _resolve_child_cwd(mode: str, staging_dir: str) -> str:
     """Resolve the working directory for the execute_code subprocess.
 
-    - ``strict``: the staging tmpdir (today's behavior).
+    - ``strict``: the staging tmpdir (default behavior).
     - ``project``: the session's TERMINAL_CWD (same as the terminal tool), or
       ``os.getcwd()`` if TERMINAL_CWD is unset or doesn't point at a real dir.
       Falls back to the staging tmpdir as a last resort so we never invoke
@@ -1679,9 +1680,9 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
     otherwise the model thinks they are available and keeps trying to use them.
 
     ``mode`` controls the working-directory sentence in the description:
-      - ``'strict'``: scripts run in a temp dir (not the session's CWD)
-      - ``'project'`` (default): scripts run in the session's CWD with the
-        active venv's python
+      - ``'strict'`` (default): scripts run in a temp dir (not the session's CWD)
+      - ``'project'``: scripts run in the session's CWD with the active venv's
+        python
     If ``mode`` is None, the current ``code_execution.mode`` config is read.
     """
     if enabled_sandbox_tools is None:
@@ -1703,17 +1704,18 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
     else:
         import_str = "..."
 
-    # Mode-specific CWD guidance. Project mode is the default and matches
-    # terminal()'s filesystem/interpreter; strict mode retains the isolated
-    # temp-dir staging and hermes-agent's own python.
+    # Mode-specific CWD guidance. Strict mode is the default so transient
+    # scratch files stay in temp; project mode is an explicit opt-in when the
+    # script needs terminal()-style filesystem/interpreter behavior.
     if mode == "strict":
         cwd_note = (
             "Scripts run in their own temp dir, not the session's CWD — use absolute paths "
-            "(os.path.expanduser('~/.hermes/.env')) or terminal()/read_file() for user files."
+            "or Hermes file tools for project files and deliverables."
         )
     else:
         cwd_note = (
-            "Scripts run in the session's working directory with the active venv's python, "
+            "In explicit project mode, scripts run in the session's working "
+            "directory with the active venv's python, "
             "so project deps (pandas, etc.) and relative paths work like in terminal()."
         )
 
