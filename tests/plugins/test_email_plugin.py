@@ -115,6 +115,7 @@ class TestReadEmail:
 
 class TestDraftReply:
     def test_argv(self, email_plugin):
+        import base64
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed('{"draft_id": "d1"}')) as run:
             out = email_plugin.draft_reply(message_id="m1", body="thanks")
         argv = run.call_args[0][0]
@@ -127,6 +128,10 @@ class TestDraftReply:
         assert "--body" in argv
         body = json.loads(argv[argv.index("--body") + 1])
         assert body["message"]["threadId"] == "m1"
+        raw = body["message"]["raw"]
+        # raw must be base64url-encoded, not plain text
+        decoded = base64.urlsafe_b64decode(raw + "==").decode()
+        assert "thanks" in decoded
         assert out == {"draft_id": "d1"}
 
 
@@ -146,20 +151,20 @@ class TestSendEmail:
 
 
 class TestMarkEmail:
-    def test_mark_read_removes_unread(self, email_plugin):
+    def test_add_label(self, email_plugin):
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("{}")) as run:
-            email_plugin.mark_email(message_id="m1", read=True)
+            email_plugin.mark_email(message_id="m1", add_label="UNREAD")
         argv = run.call_args[0][0]
         assert argv[1:5] == ["gmail", "users", "messages", "modify"]
         body = json.loads(argv[argv.index("--body") + 1])
-        assert body["removeLabelIds"] == ["UNREAD"]
+        assert body["addLabelIds"] == ["UNREAD"]
 
-    def test_mark_unread_adds_unread(self, email_plugin):
+    def test_remove_label(self, email_plugin):
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("{}")) as run:
-            email_plugin.mark_email(message_id="m1", read=False)
+            email_plugin.mark_email(message_id="m1", remove_label="UNREAD")
         argv = run.call_args[0][0]
         body = json.loads(argv[argv.index("--body") + 1])
-        assert body["addLabelIds"] == ["UNREAD"]
+        assert body["removeLabelIds"] == ["UNREAD"]
 
 
 class TestErrorPropagation:

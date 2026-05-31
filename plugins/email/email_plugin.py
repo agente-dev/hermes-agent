@@ -63,7 +63,10 @@ def _gws_json(args: list[str]) -> Any:
         return {"error": "gws_timeout", "timeout": _GWS_TIMEOUT}
     if result.returncode != 0:
         return {"error": "gws_error", "stderr": result.stderr.strip(), "returncode": result.returncode}
-    return json.loads(result.stdout)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {"error": "gws_bad_json", "raw": result.stdout[:500]}
 
 
 def list_emails(folder: str = "INBOX", since: str | None = None, limit: int = 10) -> list[dict]:
@@ -82,8 +85,14 @@ def read_email(message_id: str) -> dict:
 
 def draft_reply(message_id: str, body: str) -> dict:
     """Create a Gmail draft replying to ``message_id`` with ``body``."""
+    import base64
+    import email.mime.text
+    msg = email.mime.text.MIMEText(body)
+    msg["In-Reply-To"] = message_id
+    msg["References"] = message_id
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     params = {"userId": "me"}
-    draft_body = {"message": {"threadId": message_id, "raw": body}}
+    draft_body = {"message": {"threadId": message_id, "raw": raw}}
     return _gws_json(["gmail", "users", "drafts", "create", "--params", json.dumps(params), "--body", json.dumps(draft_body)])
 
 
@@ -100,12 +109,12 @@ def send_email(to: str, subject: str, body: str) -> dict:
     return _gws_json(["gmail", "users", "messages", "send", "--params", json.dumps(params), "--body", json.dumps(message_body)])
 
 
-def mark_email(message_id: str, read: bool = True) -> dict:
-    """Add or remove the UNREAD label on ``message_id``."""
+def mark_email(message_id: str, add_label: str | None = None, remove_label: str | None = None) -> dict:
+    """Add or remove a label on ``message_id``."""
     params = {"userId": "me", "id": message_id}
     body: dict[str, Any] = {}
-    if read:
-        body["removeLabelIds"] = ["UNREAD"]
-    else:
-        body["addLabelIds"] = ["UNREAD"]
+    if add_label:
+        body["addLabelIds"] = [add_label]
+    if remove_label:
+        body["removeLabelIds"] = [remove_label]
     return _gws_json(["gmail", "users", "messages", "modify", "--params", json.dumps(params), "--body", json.dumps(body)])
