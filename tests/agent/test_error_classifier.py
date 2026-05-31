@@ -277,6 +277,17 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.billing
         assert result.retryable is False
 
+    def test_429_insufficient_quota_type_is_billing(self):
+        """429 with type=insufficient_quota must also be non-retryable billing."""
+        e = MockAPIError(
+            "HTTP 429: Insufficient quota",
+            status_code=429,
+            body={"error": {"type": "insufficient_quota", "message": "Quota exceeded"}},
+        )
+        result = classify_api_error(e, provider="openai")
+        assert result.reason == FailoverReason.billing
+        assert result.retryable is False
+
     def test_429_generic_still_rate_limit(self):
         """Plain 429 without budget code keeps existing rate_limit behavior (regression guard)."""
         e = MockAPIError(

@@ -3851,6 +3851,22 @@ class TestCredentialPoolRecovery:
         assert context["message"] == "Weekly credits exhausted."
         assert context["reset_at"] == "2026-04-12T10:30:00Z"
 
+    def test_extract_api_error_context_preserves_error_type_reason(self, agent):
+        error = SimpleNamespace(
+            body={
+                "error": {
+                    "type": "insufficient_quota",
+                    "message": "Quota exceeded.",
+                }
+            },
+            response=SimpleNamespace(headers={}),
+        )
+
+        context = agent._extract_api_error_context(error)
+
+        assert context["reason"] == "insufficient_quota"
+        assert context["message"] == "Quota exceeded."
+
     def test_recover_with_pool_passes_error_context_on_rotated_429(self, agent):
         next_entry = SimpleNamespace(label="secondary")
         captured = {}

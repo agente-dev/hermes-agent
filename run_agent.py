@@ -4845,7 +4845,7 @@ class AIAgent:
         if isinstance(body, dict):
             payload = body.get("error") if isinstance(body.get("error"), dict) else body
         if isinstance(payload, dict):
-            reason = payload.get("code") or payload.get("error")
+            reason = payload.get("code") or payload.get("type") or payload.get("error")
             if isinstance(reason, str) and reason.strip():
                 context["reason"] = reason.strip()
             message = payload.get("message") or payload.get("error_description")
