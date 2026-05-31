@@ -3259,3 +3259,72 @@ def unified_search(query: str, sources: List[SkillSource],
     deduped = list(seen.values())
 
     return deduped[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Per-skill schema accessors (Wave-A /v1/agent/execute_skill primitive).
+#
+# Skill authors may declare JSON Schemas for their inputs and outputs in
+# SKILL.md frontmatter under the keys ``inputs_schema`` and
+# ``outputs_schema``.  The execute_skill endpoint uses these to enforce a
+# structured contract on the synchronous response, so the desktop UI (and
+# any external orchestrator) can rely on a predictable shape instead of
+# parsing free-form model output.
+#
+# Both accessors are tolerant: if a skill is not found, or no schema is
+# declared, they return ``None`` rather than raising.  Validation logic
+# lives in ``tools/skill_executor.py`` so this module stays free of
+# jsonschema as a hard dependency.
+# ---------------------------------------------------------------------------
+
+
+def _load_skill_frontmatter(skill_id: str) -> Optional[Dict[str, Any]]:
+    """Resolve ``skill_id`` to its parsed SKILL.md frontmatter, or None."""
+    try:
+        from tools.skills_tool import _find_all_skills
+    except Exception:  # pragma: no cover - defensive import guard
+        return None
+
+    target = skill_id.strip()
+    if not target:
+        return None
+
+    for skill in _find_all_skills():
+        if skill.get("name") == target:
+            fm = skill.get("frontmatter")
+            if isinstance(fm, dict):
+                return fm
+            return None
+    return None
+
+
+def get_skill_input_schema(skill_id: str) -> Optional[Dict[str, Any]]:
+    """Return the declared inputs JSON Schema for ``skill_id``, or None.
+
+    Looks for the ``inputs_schema`` key in SKILL.md frontmatter.  Returns
+    ``None`` when the skill is unknown or the author omitted a schema —
+    callers should treat that as "no validation".
+    """
+    fm = _load_skill_frontmatter(skill_id)
+    if not fm:
+        return None
+    schema = fm.get("inputs_schema")
+    return schema if isinstance(schema, dict) else None
+
+
+def get_skill_output_schema(skill_id: str) -> Optional[Dict[str, Any]]:
+    """Return the declared outputs JSON Schema for ``skill_id``, or None.
+
+    Same semantics as :func:`get_skill_input_schema` but reads the
+    ``outputs_schema`` frontmatter key.
+    """
+    fm = _load_skill_frontmatter(skill_id)
+    if not fm:
+        return None
+    schema = fm.get("outputs_schema")
+    return schema if isinstance(schema, dict) else None
+
+
+def skill_exists(skill_id: str) -> bool:
+    """Cheap existence probe used by the execute_skill endpoint."""
+    return _load_skill_frontmatter(skill_id) is not None
