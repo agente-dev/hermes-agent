@@ -911,7 +911,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — return hermes-agent as an available model."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         return web.json_response({
@@ -960,7 +960,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_skills(self, request: "web.Request") -> "web.Response":
         """GET /v1/skills — return available Hermes skills for UI discovery."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         try:
@@ -980,7 +980,7 @@ class APIServerAdapter(BasePlatformAdapter):
         every Hermes version exposes the same endpoints.
         """
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         return web.json_response({
@@ -1036,7 +1036,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         # Parse request body
@@ -2102,7 +2102,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_responses(self, request: "web.Request") -> "web.Response":
         """POST /v1/responses — OpenAI Responses API format."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         # Long-term memory scope header (see chat_completions for details).
@@ -2383,7 +2383,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_get_response(self, request: "web.Request") -> "web.Response":
         """GET /v1/responses/{response_id} — retrieve a stored response."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         response_id = request.match_info["response_id"]
@@ -2396,7 +2396,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_delete_response(self, request: "web.Request") -> "web.Response":
         """DELETE /v1/responses/{response_id} — delete a stored response."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         response_id = request.match_info["response_id"]
@@ -2441,10 +2441,10 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_list_jobs(self, request: "web.Request") -> "web.Response":
         """GET /api/jobs — list all cron jobs."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         try:
             include_disabled = request.query.get("include_disabled", "").lower() in ("true", "1")
@@ -2456,10 +2456,10 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_create_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs — create a new cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         try:
             body = await request.json()
@@ -2504,13 +2504,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_get_job(self, request: "web.Request") -> "web.Response":
         """GET /api/jobs/{job_id} — get a single cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             job = _cron_get(job_id)
@@ -2523,13 +2523,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_update_job(self, request: "web.Request") -> "web.Response":
         """PATCH /api/jobs/{job_id} — update a cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             body = await request.json()
@@ -2556,13 +2556,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_delete_job(self, request: "web.Request") -> "web.Response":
         """DELETE /api/jobs/{job_id} — delete a cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             success = _cron_remove(job_id)
@@ -2575,13 +2575,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_pause_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/pause — pause a cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             job = _cron_pause(job_id)
@@ -2594,13 +2594,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_resume_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/resume — resume a paused cron job."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             job = _cron_resume(job_id)
@@ -2613,13 +2613,13 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_run_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/run — trigger immediate execution."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
         cron_err = self._check_jobs_available()
-        if cron_err:
+        if cron_err is not None:
             return cron_err
         job_id, id_err = self._check_job_id(request)
-        if id_err:
+        if id_err is not None:
             return id_err
         try:
             job = _cron_trigger(job_id)
@@ -2869,7 +2869,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_runs(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs — start an agent run, return run_id immediately."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         # Long-term memory scope header (see chat_completions for details).
@@ -3165,7 +3165,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_get_run(self, request: "web.Request") -> "web.Response":
         """GET /v1/runs/{run_id} — return pollable run status for external UIs."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         run_id = request.match_info["run_id"]
@@ -3180,7 +3180,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_run_events(self, request: "web.Request") -> "web.StreamResponse":
         """GET /v1/runs/{run_id}/events — SSE stream of structured agent lifecycle events."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         run_id = request.match_info["run_id"]
@@ -3230,7 +3230,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_run_approval(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs/{run_id}/approval — resolve a pending run approval."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         run_id = request.match_info["run_id"]
@@ -3315,7 +3315,7 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_stop_run(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs/{run_id}/stop — interrupt a running agent."""
         auth_err = self._check_auth(request)
-        if auth_err:
+        if auth_err is not None:
             return auth_err
 
         run_id = request.match_info["run_id"]
