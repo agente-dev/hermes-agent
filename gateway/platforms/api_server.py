@@ -3520,6 +3520,35 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/skills", self._handle_skills)
             self._app.router.add_post("/v1/agent/execute_skill", self._handle_execute_skill)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
+
+            # Wire the default agent runner for /v1/agent/execute_skill.
+            # This must happen after the router is set up so the adapter
+            # (self) is fully initialised, but before the server begins
+            # accepting requests.  The runner creates a fresh AIAgent per
+            # call and surfaces the agent's final text response as the
+            # ``result`` key in the outputs dict.
+            from tools.skill_executor import register_default_runner
+
+            async def _default_skill_runner(
+                skill_id: str,
+                inputs: "Dict[str, Any]",
+                context_budget_tokens: int,
+                timeout_seconds: float,
+            ) -> "Dict[str, Any]":
+                import json as _json
+
+                inputs_repr = _json.dumps(inputs, ensure_ascii=False) if inputs else "{}"
+                user_message = (
+                    f"Run the skill '{skill_id}' with the following inputs:\n{inputs_repr}"
+                )
+                result_dict, _usage = await self._run_agent(
+                    user_message=user_message,
+                    conversation_history=[],
+                )
+                final_text = result_dict.get("final_message", "") or result_dict.get("response", "") or ""
+                return {"result": final_text}
+
+            register_default_runner(_default_skill_runner)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
