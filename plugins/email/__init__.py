@@ -28,7 +28,7 @@ LIST_EMAILS_SCHEMA = {
         "type": "object",
         "properties": {
             "folder": {"type": "string", "description": "Gmail folder / label (default INBOX)"},
-            "max": {"type": "integer", "description": "Max messages to return (default 10)"},
+            "limit": {"type": "integer", "description": "Max messages to return (default 10)"},
         },
     },
 }
@@ -108,7 +108,7 @@ def _wrap(fn, *arg_names: str):
 
 
 _TOOLS = (
-    ("list_emails", LIST_EMAILS_SCHEMA, _wrap(email_plugin.list_emails, "folder", "max"), "📥"),
+    ("list_emails", LIST_EMAILS_SCHEMA, _wrap(email_plugin.list_emails, "folder", "limit"), "📥"),
     ("read_email",  READ_EMAIL_SCHEMA,  _wrap(email_plugin.read_email,  "message_id"),    "📨"),
     ("draft_reply", DRAFT_REPLY_SCHEMA, _wrap(email_plugin.draft_reply, "message_id", "body"), "📝"),
     ("send_email",  SEND_EMAIL_SCHEMA,  _wrap(email_plugin.send_email,  "to", "subject", "body"), "📤"),
