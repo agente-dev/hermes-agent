@@ -1845,6 +1845,80 @@ class TestExecuteToolCalls:
         assert "API call failed" not in output
         assert "Rate limit reached" not in output
 
+    def test_run_conversation_budget_exhausted_429_fails_without_retry(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+        class _BudgetExhaustedError(Exception):
+            status_code = 429
+            body = {
+                "error": {
+                    "code": "budget_exhausted",
+                    "message": "Token budget exhausted",
+                }
+            }
+
+            def __str__(self):
+                return "HTTP 429: Token budget exhausted"
+
+        calls = {"api": 0}
+
+        def _fake_api_call(api_kwargs):
+            calls["api"] += 1
+            raise _BudgetExhaustedError()
+
+        with (
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert calls["api"] == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["status_code"] == 429
+        assert result["error_type"] == "billing"
+        assert result["error_code"] == "budget_exhausted"
+        assert result["retryable"] is False
+
+    def test_run_conversation_server_error_still_retries(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+        class _ServerError(Exception):
+            status_code = 500
+
+            def __str__(self):
+                return "HTTP 500: upstream unavailable"
+
+        calls = {"api": 0}
+
+        def _fake_api_call(api_kwargs):
+            calls["api"] += 1
+            if calls["api"] == 1:
+                raise _ServerError()
+            return _mock_response(content="Recovered")
+
+        with (
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert calls["api"] == 2
+        assert result["completed"] is True
+        assert result["final_response"] == "Recovered"
+
 
 class TestConcurrentToolExecution:
     """Tests for _execute_tool_calls_concurrent and dispatch logic."""
