@@ -54,10 +54,13 @@ security investigation.
 
 ### Update (`PATCH /api/jobs/{id}`) — allowed fields
 
-`name`, `prompt`, `skills`, `skill`, `model`, `provider`, `base_url`, `script`, `no_agent`,
-`context_from`, `schedule`, `repeat`, `enabled`, `deliver`, `enabled_toolsets`, `workdir`
+`name`, `schedule`, `prompt`, `deliver`, `skills`, `skill`, `repeat`, `enabled`
 
-Unknown fields are silently ignored. A body containing only unknown fields returns `400`.
+These match the `_UPDATE_ALLOWED_FIELDS` whitelist enforced by `gateway/platforms/api_server.py`.
+Any other keys (for example `model`, `provider`, `base_url`, `script`, `no_agent`,
+`context_from`, `enabled_toolsets`, `workdir`) are silently dropped from the sanitized
+payload. A body containing only disallowed/unknown fields returns `400 Bad Request`
+with `{"error": "No valid fields to update"}`.
 
 ### Job object (response)
 

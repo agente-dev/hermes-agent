@@ -672,7 +672,7 @@ class TestCronUnavailable:
 class TestJobsRoundTrip:
     @pytest.mark.asyncio
     async def test_jobs_round_trip(self, adapter):
-        """Full lifecycle: create → list → get → pause → resume → run → delete → verify gone."""
+        """Full lifecycle: create → list → get → patch → pause → resume → run → delete → verify gone."""
         app = _create_app(adapter)
 
         created_job = {
@@ -683,14 +683,16 @@ class TestJobsRoundTrip:
             "deliver": "local",
             "enabled": True,
         }
-        paused_job = {**created_job, "enabled": False, "paused_at": "2026-01-01T00:00:00Z"}
-        resumed_job = {**created_job, "enabled": True}
-        triggered_job = {**created_job, "last_run_at": "2026-01-01T01:00:00Z"}
+        updated_job = {**created_job, "name": "round-trip-job-renamed", "prompt": "updated prompt"}
+        paused_job = {**updated_job, "enabled": False, "paused_at": "2026-01-01T00:00:00Z"}
+        resumed_job = {**updated_job, "enabled": True}
+        triggered_job = {**updated_job, "last_run_at": "2026-01-01T01:00:00Z"}
 
         mock_create = MagicMock(return_value=created_job)
         mock_list_with = MagicMock(return_value=[created_job])
         mock_list_empty = MagicMock(return_value=[])
         mock_get = MagicMock(return_value=created_job)
+        mock_update = MagicMock(return_value=updated_job)
         mock_pause = MagicMock(return_value=paused_job)
         mock_resume = MagicMock(return_value=resumed_job)
         mock_trigger = MagicMock(return_value=triggered_job)
@@ -729,6 +731,30 @@ class TestJobsRoundTrip:
                     assert data["job"]["id"] == job_id
                     assert data["job"]["name"] == "round-trip-job"
                     mock_get.assert_called_once_with(job_id)
+
+                # Step 3b: PATCH /api/jobs/{id} — update allowed fields
+                with patch(f"{_MOD}._cron_update", mock_update):
+                    resp = await cli.patch(
+                        f"/api/jobs/{job_id}",
+                        json={
+                            "name": "round-trip-job-renamed",
+                            "prompt": "updated prompt",
+                            # `model` is not in _UPDATE_ALLOWED_FIELDS — must be silently dropped
+                            "model": "should-be-ignored",
+                        },
+                    )
+                    assert resp.status == 200, f"patch failed: {await resp.text()}"
+                    data = await resp.json()
+                    assert data["job"]["id"] == job_id
+                    assert data["job"]["name"] == "round-trip-job-renamed"
+                    assert data["job"]["prompt"] == "updated prompt"
+                    # Verify the handler sanitized the disallowed field before invoking _cron_update
+                    mock_update.assert_called_once()
+                    call_job_id, call_sanitized = mock_update.call_args.args
+                    assert call_job_id == job_id
+                    assert "model" not in call_sanitized
+                    assert call_sanitized.get("name") == "round-trip-job-renamed"
+                    assert call_sanitized.get("prompt") == "updated prompt"
 
                 # Step 4: POST /api/jobs/{id}/pause — pause the job
                 with patch(f"{_MOD}._cron_pause", mock_pause):
