@@ -48,6 +48,7 @@ from hermes_cli.config import (
     redact_key,
 )
 from gateway.status import get_running_pid, read_runtime_status
+from utils import atomic_replace
 
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -73,6 +74,85 @@ app = FastAPI(title="Hermes Agent", version=__version__)
 # ---------------------------------------------------------------------------
 _SESSION_TOKEN = secrets.token_urlsafe(32)
 _SESSION_HEADER_NAME = "X-Hermes-Session-Token"
+
+# Filename inside HERMES_HOME used to expose _SESSION_TOKEN to local
+# sidecar consumers (e.g. the agente-desktop Electron main process which
+# calls protected /api/providers/oauth/* endpoints on behalf of the user).
+# Symmetric with how Hermes already exposes other per-process state under
+# ~/.hermes/.  See hermes-202606-001.
+_SESSION_TOKEN_FILENAME = "session_token"
+
+
+def _get_session_token_path() -> Path:
+    """Resolve <HERMES_HOME>/session_token.
+
+    Kept as a function (not a module constant) so test fixtures that patch
+    HERMES_HOME at import time still see the patched value.
+    """
+    return get_hermes_home() / _SESSION_TOKEN_FILENAME
+
+
+def _write_session_token_file(token: str, path: Optional[Path] = None) -> Path:
+    """Write *token* to ``<HERMES_HOME>/session_token`` with mode 0600.
+
+    Uses a temp-file + atomic ``os.replace`` so a concurrent reader can
+    never observe a partial or zero-length file.  Permissions are applied
+    to the temp file before the rename so the target never exists with
+    world-readable bits, even briefly.
+
+    The token value is NEVER logged — only the destination path.  Callers
+    must not pass the token through any logging API.
+    """
+    target = path if path is not None else _get_session_token_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    # mkstemp creates the temp file with 0600 by default on POSIX, but be
+    # explicit so we don't rely on umask.
+    import tempfile
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(target.parent),
+        prefix=f".{_SESSION_TOKEN_FILENAME}_",
+        suffix=".tmp",
+    )
+    try:
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            # Best-effort on platforms where chmod is a no-op (Windows).
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(token)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        real_path = atomic_replace(tmp_path, target)
+        try:
+            os.chmod(real_path, 0o600)
+        except OSError:
+            pass
+        _log.info("Wrote Hermes session token file to %s (mode 0600)", target)
+        return Path(real_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _delete_session_token_file(path: Optional[Path] = None) -> None:
+    """Best-effort removal of the session-token file on clean shutdown."""
+    target = path if path is not None else _get_session_token_path()
+    try:
+        target.unlink()
+        _log.info("Removed Hermes session token file at %s", target)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _log.warning("Could not remove session token file %s: %s", target, exc)
 
 # In-browser Chat tab (/chat, /api/pty, …).  Off unless ``hermes dashboard --tui``
 # or HERMES_DASHBOARD_TUI=1.  Set from :func:`start_server`.
@@ -4244,6 +4324,27 @@ def start_server(
     # PTY child uses to publish events to the dashboard sidebar.
     app.state.bound_host = host
     app.state.bound_port = port
+
+    # Expose the session token to local sidecar consumers (e.g. the
+    # agente-desktop Electron main process calling /api/providers/oauth/*
+    # on the user's behalf).  Written before listen() so a fast-attaching
+    # consumer never races with the HTTP server coming up.
+    # Path-only, file-perms-only exposure — never on the wire.
+    # See hermes-202606-001.
+    try:
+        _write_session_token_file(_SESSION_TOKEN)
+    except OSError as exc:
+        # Don't refuse to start the server just because the seam file
+        # could not be written (e.g. read-only HERMES_HOME on weird
+        # deploys).  Local SPA still works via injected HTML.
+        _log.warning("Could not write session token seam file: %s", exc)
+
+    # Best-effort cleanup on clean shutdown.  SIGKILL / hard crashes will
+    # leave a stale file behind; the next boot overwrites it, so this is
+    # only a hygiene measure.
+    import atexit
+
+    atexit.register(_delete_session_token_file)
 
     if open_browser:
         import webbrowser

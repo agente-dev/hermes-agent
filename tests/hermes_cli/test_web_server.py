@@ -2324,3 +2324,96 @@ class TestPtyWebSocket:
             ):
                 pass
         assert exc.value.code == 4400
+
+
+# ---------------------------------------------------------------------------
+# Session token seam file tests (hermes-202606-001)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionTokenSeamFile:
+    """Verify _SESSION_TOKEN is exposed via <HERMES_HOME>/session_token.
+
+    Path-only, file-perms-only exposure for local sidecar consumers
+    (e.g. agente-desktop Electron main process driving the BYOK OAuth
+    bridge).  The token value must NEVER leak through logs or network.
+    """
+
+    def test_write_creates_file_with_0600(self, tmp_path):
+        """File is written with mode 0600 (POSIX)."""
+        from hermes_cli import web_server
+
+        target = tmp_path / "session_token"
+        web_server._write_session_token_file("abc123def456", path=target)
+
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == "abc123def456"
+        if os.name == "posix":
+            mode = target.stat().st_mode & 0o777
+            assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+
+    def test_write_is_atomic_via_temp_rename(self, tmp_path):
+        """Temp file is cleaned up; only the target remains in the dir."""
+        from hermes_cli import web_server
+
+        target = tmp_path / "session_token"
+        web_server._write_session_token_file("token-value", path=target)
+
+        # No leftover .session_token_*.tmp files
+        leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(".")]
+        assert leftovers == [], f"temp files left behind: {leftovers}"
+
+    def test_write_overwrites_existing_token_on_second_boot(self, tmp_path):
+        """Calling the writer a second time rotates the on-disk value."""
+        from hermes_cli import web_server
+
+        target = tmp_path / "session_token"
+        web_server._write_session_token_file("first-token", path=target)
+        assert target.read_text(encoding="utf-8") == "first-token"
+
+        web_server._write_session_token_file("second-token", path=target)
+        assert target.read_text(encoding="utf-8") == "second-token"
+        if os.name == "posix":
+            mode = target.stat().st_mode & 0o777
+            assert mode == 0o600
+
+    def test_delete_removes_file(self, tmp_path):
+        """Cleanup removes the file (best-effort, no error if absent)."""
+        from hermes_cli import web_server
+
+        target = tmp_path / "session_token"
+        web_server._write_session_token_file("xyz", path=target)
+        assert target.exists()
+
+        web_server._delete_session_token_file(path=target)
+        assert not target.exists()
+
+        # Calling again is a no-op (FileNotFoundError swallowed).
+        web_server._delete_session_token_file(path=target)
+
+    def test_path_resolves_under_hermes_home(self, tmp_path, monkeypatch):
+        """_get_session_token_path uses the current HERMES_HOME."""
+        from hermes_cli import web_server
+
+        monkeypatch.setattr(
+            web_server,
+            "get_hermes_home",
+            lambda: tmp_path,
+        )
+        resolved = web_server._get_session_token_path()
+        assert resolved == tmp_path / "session_token"
+
+    def test_write_does_not_log_token_value(self, tmp_path, caplog):
+        """The token value must never appear in log output."""
+        import logging
+        from hermes_cli import web_server
+
+        target = tmp_path / "session_token"
+        secret = "ULTRA-SECRET-NEVER-LOG-THIS-TOKEN-9f3a"
+        with caplog.at_level(logging.DEBUG, logger="hermes_cli.web_server"):
+            web_server._write_session_token_file(secret, path=target)
+
+        for record in caplog.records:
+            assert secret not in record.getMessage(), (
+                "Session token value leaked into log output"
+            )
