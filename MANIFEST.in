@@ -6,5 +6,7 @@ graft locales
 # built from the sdist (e.g. Homebrew, downstream packagers). package-data
 # below covers the wheel; this covers the sdist. See #34034 / #28149.
 recursive-include plugins plugin.yaml plugin.yml
+graft hermes  # bundled profiles (e.g. desktop_orchestrator) + dispatcher/nudge for step-agent foundation
+graft bin     # source-tree launcher (hermes) relocated here to free the 'hermes/' namespace for data
 global-exclude __pycache__
 global-exclude *.py[cod]

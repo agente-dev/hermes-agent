@@ -6207,10 +6207,27 @@ class GatewayRunner:
 
             # Sleep in 1s slices so shutdown is snappy — otherwise a stop()
             # waits up to `interval` seconds for the current sleep to finish.
+            # Also check for a dispatch nudge (from orchestrator tools or any
+            # other creator of ready work) so the happy path for
+            # profiles-as-step-agents is <2 s instead of up to the full tick.
             slept = 0.0
+            nudge_watermark = None
+            try:
+                from hermes.dispatcher.nudge import last_nudge_at, consume_nudge_if_fresh
+                nudge_board = None  # board is resolved inside per-tick; global nudge is fine for the profile
+                nudge_watermark = last_nudge_at(nudge_board)
+            except Exception:
+                pass
             while slept < interval and self._running:
                 await asyncio.sleep(min(1.0, interval - slept))
                 slept += 1.0
+                # Wake early on nudge
+                try:
+                    if nudge_watermark is not None:
+                        if consume_nudge_if_fresh(nudge_board, nudge_watermark):
+                            break  # run the outer while body (tick) immediately
+                except Exception:
+                    pass
 
     async def _platform_reconnect_watcher(self) -> None:
         """Background task that periodically retries connecting failed platforms.

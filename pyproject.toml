@@ -283,10 +283,15 @@ plugins = [
   "**/plugin.yaml",
   "**/plugin.yml",
   "**/README.md",
+  "**/*.json",
 ]
+# Bundled step-agent profiles (desktop_orchestrator etc.) ship their
+# SOUL.md + config.yaml alongside the package code so they materialize in
+# the installed wheel, not just the source tree.
+"hermes" = ["**/*.md", "**/*.yaml", "**/*.yml"]
 
 [tool.setuptools.packages.find]
-include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]
+include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*", "schemas", "schemas.*", "hermes", "hermes.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

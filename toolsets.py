@@ -282,6 +282,21 @@ TOOLSETS = {
         "includes": [],
     },
 
+    "desktop_orchestrator": {
+        "description": (
+            "Hermes-side orchestrator for Desktop multi-step workflows (profiles-as-step-agents). "
+            "Parses YAML, fans out kanban tasks with assignee + on_complete links, "
+            "records step outcomes, and provides the immediate dispatch nudge. "
+            "This is the only writer of workflow fan-out state; step workers only see their assigned task."
+        ),
+        "tools": [
+            "start_workflow_run",
+            "record_step_outcome",
+            "resume_step",
+        ],
+        "includes": ["kanban"],  # orchestrator also needs the low-level kanban surface to create/link
+    },
+
     "discord": {
         "description": "Discord read and participate tools (fetch messages, search members, create threads)",
         "tools": ["discord"],

@@ -1605,3 +1605,44 @@ def resolve_profile_env(profile_name: str) -> str:
         )
 
     return str(profile_dir)
+
+
+# -----------------------------------------------------------------------------
+# Profile tools discovery (desktop_orchestrator and future per-profile tools/)
+# -----------------------------------------------------------------------------
+
+def discover_profile_tools() -> None:
+    """Import any *.py under the active profile's tools/ dir.
+
+    Each module is expected to call registry.register(...) at import time,
+    exactly like the core tools/ package. This is how the bundled
+    desktop_orchestrator (shipped under hermes/profiles/ in the source and
+    copied into a user's profile) gets its start_workflow_run etc. into the
+    schema for that profile only.
+
+    Safe no-op if no tools/ dir or no active profile.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        import importlib.util
+        from pathlib import Path
+        root = Path(get_hermes_home())
+        tools_dir = root / "tools"
+        if not tools_dir.is_dir():
+            return
+        for py in sorted(tools_dir.glob("*.py")):
+            if py.name.startswith("_"):
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    f"profile_tool_{py.stem}", py
+                )
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+            except Exception as e:
+                # Do not let a bad profile tool kill the whole agent.
+                import logging
+                logging.getLogger(__name__).debug("profile tool load failed for %s: %s", py, e)
+    except Exception:
+        pass
