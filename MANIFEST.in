@@ -1,4 +1,6 @@
 graft skills
 graft optional-skills
+graft hermes  # bundled profiles (e.g. desktop_orchestrator) + dispatcher/nudge for step-agent foundation
+graft bin     # source-tree launcher (hermes) relocated here to free the 'hermes/' namespace for data
 global-exclude __pycache__
 global-exclude *.py[cod]

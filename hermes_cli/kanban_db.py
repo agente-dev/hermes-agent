@@ -1272,6 +1272,9 @@ def create_task(
     skills: Optional[Iterable[str]] = None,
     max_retries: Optional[int] = None,
     allow_pii: bool = False,
+    # Forward-compat for profiles-as-step-agents / orchestrator fan-out (intake 5).
+    workflow_template_id: Optional[str] = None,
+    current_step_key: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -1406,8 +1409,8 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         tenant, idempotency_key, max_runtime_seconds, skills,
-                        max_retries
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        max_retries, workflow_template_id, current_step_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -1425,6 +1428,8 @@ def create_task(
                         int(max_runtime_seconds) if max_runtime_seconds else None,
                         json.dumps(skills_list) if skills_list is not None else None,
                         int(max_retries) if max_retries is not None else None,
+                        workflow_template_id,
+                        current_step_key,
                     ),
                 )
                 for pid in parents:
@@ -4150,6 +4155,18 @@ def run_daemon(
             # Don't let any single tick kill the daemon.
             import traceback
             traceback.print_exc()
+        # Nudge support: if a fresh nudge file appears, wake immediately
+        # instead of waiting the full interval. This is the happy path for
+        # orchestrator fan-out (desktop-orchestrator + start_workflow_run).
+        try:
+            from hermes.dispatcher.nudge import consume_nudge_if_fresh, last_nudge_at
+            nw = last_nudge_at()
+            if nw is not None and consume_nudge_if_fresh(None, getattr(_run_dispatch_loop, "_nudge_wm", None)):
+                _run_dispatch_loop._nudge_wm = nw  # type: ignore[attr-defined]
+                continue  # skip the wait, run next iteration now
+            _run_dispatch_loop._nudge_wm = nw  # type: ignore[attr-defined]
+        except Exception:
+            pass
         stop_event.wait(timeout=interval)
 
 

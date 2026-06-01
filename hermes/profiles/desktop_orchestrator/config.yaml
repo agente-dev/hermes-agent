@@ -1,0 +1,11 @@
+# Bundled desktop-orchestrator profile (foundation for profiles-as-step-agents).
+# This profile is the single writer of workflow fan-out state.
+# It opts into the kanban toolset so it can create/link tasks for steps,
+# plus its own high-level orchestrator tools (start_workflow_run etc).
+
+toolsets:
+  - kanban
+  - desktop_orchestrator
+
+# The orchestrator never executes steps itself; it only fans out.
+# Specialist profiles (the assignees) run the actual work.

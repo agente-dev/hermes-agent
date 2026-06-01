@@ -199,6 +199,15 @@ try:
 except Exception as e:
     logger.debug("Plugin discovery failed: %s", e)
 
+# Per-profile tools/ (e.g. desktop_orchestrator shipped in hermes/profiles/
+# and materialized under the active HERMES_HOME). Must run after plugins
+# so profile-specific registrations win for that session.
+try:
+    from hermes_cli.profiles import discover_profile_tools
+    discover_profile_tools()
+except Exception as e:
+    logger.debug("Profile tools discovery failed: %s", e)
+
 
 # =============================================================================
 # Backward-compat constants  (built once after discovery)

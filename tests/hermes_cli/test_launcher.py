@@ -1,4 +1,10 @@
-"""Tests for the top-level `./hermes` launcher script."""
+"""Tests for the source-tree `hermes` launcher script.
+
+The launcher lives at ``bin/hermes`` (relocated from the repo root to free
+the top-level ``hermes/`` namespace for the bundled step-agent profiles
+package); the installed ``hermes`` command is wired via the
+``[project.scripts]`` entry point in ``pyproject.toml``.
+"""
 
 import runpy
 import sys
@@ -7,8 +13,8 @@ from pathlib import Path
 
 
 def test_launcher_delegates_to_argparse_entrypoint(monkeypatch):
-    """`./hermes` should use `hermes_cli.main`, not the legacy Fire wrapper."""
-    launcher_path = Path(__file__).resolve().parents[2] / "hermes"
+    """`bin/hermes` should use `hermes_cli.main`, not the legacy Fire wrapper."""
+    launcher_path = Path(__file__).resolve().parents[2] / "bin" / "hermes"
     called = []
 
     fake_main_module = types.ModuleType("hermes_cli.main")

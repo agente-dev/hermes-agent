@@ -196,9 +196,13 @@ gateway = ["assets/**/*"]
 # the loader registers nothing. Wildcard ships plugin.yaml + README/etc.
 # for every bundled plugin (kanban, google_meet, agente_desktop, ...).
 "plugins" = ["**/plugin.yaml", "**/*.md", "**/*.yaml", "**/*.json"]
+# Bundled step-agent profiles (desktop_orchestrator etc.) ship their
+# SOUL.md + config.yaml alongside the package code so they materialize in
+# the installed wheel, not just the source tree.
+"hermes" = ["**/*.md", "**/*.yaml", "**/*.yml"]
 
 [tool.setuptools.packages.find]
-include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*", "schemas", "schemas.*"]
+include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*", "schemas", "schemas.*", "hermes", "hermes.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
