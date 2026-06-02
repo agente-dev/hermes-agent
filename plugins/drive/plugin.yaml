@@ -1,0 +1,9 @@
+name: drive
+version: 1.0.0
+description: "Google Drive connector via the bundled `gws` (Google Workspace CLI) subprocess. Thin marshaller — OAuth + token storage owned entirely by gws (same auth path as the email plugin). Exposes list_files, get_file, search_files. Operator connects Drive via the desktop Connectors UI (`gws auth login -s gmail,calendar,drive`)."
+author: agente
+kind: backend
+provides_tools:
+  - list_files
+  - get_file
+  - search_files

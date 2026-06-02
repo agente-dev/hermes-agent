@@ -1,0 +1,11 @@
+name: email
+version: 1.0.0
+description: "Gmail connector via the bundled `gws` (Google Workspace CLI) subprocess. Thin marshaller — OAuth + token storage owned entirely by gws. Exposes list_emails, read_email, draft_reply, send_email, mark_email. Operator connects Gmail via the desktop Connectors UI (`gws auth login -s gmail,calendar,drive`); gws path injected via AGENTE_GWS_BIN env."
+author: agente
+kind: backend
+provides_tools:
+  - list_emails
+  - read_email
+  - draft_reply
+  - send_email
+  - mark_email
