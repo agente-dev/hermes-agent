@@ -15,8 +15,8 @@ from typing import Any
 DRIVE_SEARCH_SCHEMA: dict[str, Any] = {
     "name": "drive_search",
     "description": (
-        "Search Google Drive. Shells `gws drive search --json`. Optional "
-        "filters: mime_type (e.g. application/pdf), modified_after "
+        "Search Google Drive. Shells `gws drive files list --params ...`. "
+        "Optional filters: mime_type (e.g. application/pdf), modified_after "
         "(RFC3339 timestamp), limit (default 25)."
     ),
     "label_he": "חיפוש בדרייב",
@@ -60,7 +60,7 @@ DRIVE_SEARCH_SCHEMA: dict[str, Any] = {
 DRIVE_GET_SCHEMA: dict[str, Any] = {
     "name": "drive_get",
     "description": (
-        "Fetch a single Drive file by id. Shells `gws drive get --json`. "
+        "Fetch a single Drive file by id. Shells `gws drive files get --params ...`. "
         "Returns file metadata plus either an inline base64 payload "
         "(content_b64) or a short-lived download_url, depending on file size."
     ),

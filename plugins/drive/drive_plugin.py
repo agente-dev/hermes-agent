@@ -4,9 +4,9 @@ OAuth and token storage are owned entirely by gws; this plugin never
 touches credentials. Two tools:
 
   * ``drive_search(query, mime_type?, modified_after?, limit?)`` →
-    ``gws drive search --json`` → list of file records.
+    ``gws drive files list --params ...`` → list of file records.
   * ``drive_get(file_id)`` →
-    ``gws drive get --json`` → file metadata + payload envelope.
+    ``gws drive files get --params ...`` → file metadata + payload envelope.
 
 Binary resolution mirrors the email + calendar plugins:
 
@@ -67,7 +67,7 @@ def check_drive_available() -> bool:
     return bool(os.environ.get("AGENTE_GWS_BIN") or shutil.which("gws"))
 
 
-def _run_gws_json(argv: list[str]) -> Any:
+def _run_gws_json(argv: list[str], *, params: dict[str, Any] | None = None) -> Any:
     """Run ``gws <argv>`` and return parsed JSON stdout.
 
     Raises :class:`GwsNotAvailableError` if the binary cannot be resolved,
@@ -75,6 +75,8 @@ def _run_gws_json(argv: list[str]) -> Any:
     """
     gws_bin = _resolve_gws_bin()
     cmd = [gws_bin, *argv]
+    if params is not None:
+        cmd += ["--params", json.dumps(params, ensure_ascii=False)]
     logger.debug("gws: %s", cmd)
     try:
         result = subprocess.run(
@@ -122,6 +124,38 @@ def _coerce_limit(raw: Any, *, default: int = 25, minimum: int = 1, maximum: int
     return max(minimum, min(maximum, value))
 
 
+def _drive_query_literal(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _build_drive_search_query(
+    query: str,
+    *,
+    mime_type: str | None = None,
+    modified_after: str | None = None,
+) -> str:
+    parts = [f"fullText contains '{_drive_query_literal(query)}'"]
+    if mime_type:
+        parts.append(f"mimeType = '{_drive_query_literal(mime_type)}'")
+    if modified_after:
+        parts.append(f"modifiedTime > '{_drive_query_literal(modified_after)}'")
+    return " and ".join(parts)
+
+
+def _normalize_drive_file(file_data: Any) -> dict[str, Any]:
+    if not isinstance(file_data, dict):
+        return {"metadata": file_data}
+
+    normalized = {
+        "file_id": file_data.get("id"),
+        "name": file_data.get("name"),
+        "mime_type": file_data.get("mimeType"),
+        "modified_time": file_data.get("modifiedTime"),
+        "web_view_link": file_data.get("webViewLink"),
+    }
+    return {key: value for key, value in normalized.items() if value is not None}
+
+
 def _gws_to_tool_error(exc: Exception) -> str:
     if isinstance(exc, GwsNotAvailableError):
         return tool_error(
@@ -148,40 +182,68 @@ def _audit(event: str, **fields: Any) -> None:
 
 
 def handle_drive_search(args: dict, **_kw: Any) -> str:
-    """``drive_search`` handler — shells ``gws drive search --json``."""
+    """``drive_search`` handler — shells ``gws drive files list --params``."""
     query = (args.get("query") or "").strip()
     if not query:
         return tool_error("query is required")
     limit = _coerce_limit(args.get("limit"))
-    argv = ["drive", "search", "--query", query, "--limit", str(limit), "--json"]
 
     mime_type = args.get("mime_type")
-    if isinstance(mime_type, str) and mime_type.strip():
-        argv += ["--mime", mime_type.strip()]
+    mime_filter = mime_type.strip() if isinstance(mime_type, str) and mime_type.strip() else None
 
     modified_after = args.get("modified_after")
-    if isinstance(modified_after, str) and modified_after.strip():
-        argv += ["--modified-after", modified_after.strip()]
+    modified_filter = (
+        modified_after.strip()
+        if isinstance(modified_after, str) and modified_after.strip()
+        else None
+    )
+
+    params = {
+        "q": _build_drive_search_query(
+            query,
+            mime_type=mime_filter,
+            modified_after=modified_filter,
+        ),
+        "pageSize": limit,
+        "fields": "files(id, name, mimeType, modifiedTime, webViewLink)",
+    }
 
     _audit("search", query=query, mime_type=mime_type, limit=limit)
     try:
-        data = _run_gws_json(argv)
+        data = _run_gws_json(["drive", "files", "list"], params=params)
     except Exception as exc:  # noqa: BLE001 — convert to tool envelope
         return _gws_to_tool_error(exc)
     files = data if isinstance(data, list) else (data or {}).get("files", [])
-    return tool_result({"files": files, "query": query, "limit": limit})
+    return tool_result({
+        "files": [_normalize_drive_file(file_data) for file_data in files],
+        "query": query,
+        "limit": limit,
+    })
 
 
 def handle_drive_get(args: dict, **_kw: Any) -> str:
-    """``drive_get`` handler — shells ``gws drive get --json``."""
+    """``drive_get`` handler — shells ``gws drive files get --params``."""
     file_id = (args.get("file_id") or "").strip()
     if not file_id:
         return tool_error("file_id is required")
-    argv = ["drive", "get", "--id", file_id, "--json"]
+    fields = (
+        "id, name, mimeType, modifiedTime, size, webViewLink, webContentLink, "
+        "parents, owners(emailAddress)"
+    )
+    params = {"fileId": file_id, "fields": fields}
 
     _audit("get", file_id=file_id)
     try:
-        data = _run_gws_json(argv)
+        data = _run_gws_json(["drive", "files", "get"], params=params)
     except Exception as exc:  # noqa: BLE001
         return _gws_to_tool_error(exc)
-    return tool_result(data if isinstance(data, dict) else {"file": data})
+    if not isinstance(data, dict):
+        return tool_result({"file": data})
+    metadata = dict(data)
+    result = {
+        "name": data.get("name"),
+        "mime_type": data.get("mimeType"),
+        "download_url": data.get("webContentLink") or data.get("webViewLink"),
+        "metadata": metadata,
+    }
+    return tool_result({key: value for key, value in result.items() if value is not None})

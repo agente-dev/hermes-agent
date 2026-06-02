@@ -34,13 +34,21 @@ _TOOLS = (
 )
 
 
+def _model_schema(schema: dict) -> dict:
+    """Return the model-facing function schema without registry-only metadata."""
+    clean = dict(schema)
+    clean.pop("label_he", None)
+    clean.pop("category", None)
+    return clean
+
+
 def register(ctx) -> None:
     """Register all drive tools. Called once by the plugin loader."""
     for name, schema, handler, emoji in _TOOLS:
         ctx.register_tool(
             name=name,
             toolset="drive",
-            schema=schema,
+            schema=_model_schema(schema),
             handler=handler,
             check_fn=check_drive_available,
             emoji=emoji,
