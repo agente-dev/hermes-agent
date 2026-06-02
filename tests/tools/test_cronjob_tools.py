@@ -284,6 +284,58 @@ class TestUnifiedCronjobTool:
         listing = json.loads(cronjob(action="list"))
         assert listing["jobs"][0]["skills"] == ["blogwatcher", "maps"]
 
+    def test_workflow_ids_passthrough_round_trip(self):
+        """create_job + update_job round-trip the optional workflow_ids[] field.
+
+        Pure passthrough association — Hermes does not validate references.
+        """
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Send the weekly summary.",
+                schedule="every 1h",
+                name="Weekly summary",
+                workflow_ids=["wf_intake_v1", "wf_summary_v3"],
+            )
+        )
+        assert created["success"] is True
+        assert created["job"]["workflow_ids"] == ["wf_intake_v1", "wf_summary_v3"]
+
+        listing = json.loads(cronjob(action="list"))
+        assert listing["jobs"][0]["workflow_ids"] == ["wf_intake_v1", "wf_summary_v3"]
+
+        updated = json.loads(
+            cronjob(
+                action="update",
+                job_id=created["job_id"],
+                workflow_ids=["wf_summary_v3", "wf_new", "wf_summary_v3"],
+            )
+        )
+        assert updated["success"] is True
+        assert updated["job"]["workflow_ids"] == ["wf_summary_v3", "wf_new"]
+
+        cleared = json.loads(
+            cronjob(
+                action="update",
+                job_id=created["job_id"],
+                workflow_ids=[],
+            )
+        )
+        assert cleared["success"] is True
+        assert "workflow_ids" not in cleared["job"]
+
+    def test_workflow_ids_optional_defaults_empty(self):
+        """Omitting workflow_ids leaves the field unset (collapsible / default empty)."""
+        result = json.loads(
+            cronjob(
+                action="create",
+                prompt="Anything.",
+                schedule="every 1h",
+            )
+        )
+        assert result["success"] is True
+        assert "workflow_ids" not in result["job"]
+
     def test_multi_skill_default_name_prefers_prompt_when_present(self):
         result = json.loads(
             cronjob(

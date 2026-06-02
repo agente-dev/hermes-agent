@@ -128,6 +128,29 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
         state = "scheduled" if normalized.get("enabled", True) else "paused"
     normalized["state"] = state
 
+    # workflow_ids is a passthrough association field — keep storage shape
+    # consistent for read consumers even when older records predate the field.
+    raw_workflow_ids = normalized.get("workflow_ids")
+    if raw_workflow_ids is None:
+        normalized["workflow_ids"] = None
+    else:
+        if isinstance(raw_workflow_ids, str):
+            raw_workflow_ids = [raw_workflow_ids]
+        if isinstance(raw_workflow_ids, (list, tuple)):
+            cleaned_ids: List[str] = []
+            seen_ids: set[str] = set()
+            for item in raw_workflow_ids:
+                if item is None:
+                    continue
+                value = str(item).strip()
+                if not value or value in seen_ids:
+                    continue
+                seen_ids.add(value)
+                cleaned_ids.append(value)
+            normalized["workflow_ids"] = cleaned_ids or None
+        else:
+            normalized["workflow_ids"] = None
+
     return normalized
 
 
@@ -479,6 +502,38 @@ def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:
     return str(resolved)
 
 
+def _normalize_workflow_ids(workflow_ids: Optional[Any]) -> Optional[List[str]]:
+    """Normalize an optional ``workflow_ids`` passthrough field.
+
+    This is a pure passthrough used by upstream consumers (e.g. agente-desktop)
+    to associate a cron routine with one or more workflow records. The cron
+    layer does not validate that referenced workflows exist — owners handle
+    stale references at render time (e.g. a muted "(deleted workflow)" chip).
+
+    Accepts ``None`` / missing (clears the field), a single string (wrapped
+    into a one-element list), or a list of strings (de-duped preserving
+    insertion order, stripped, with blanks dropped). An empty result becomes
+    ``None`` so storage stays compact and read paths can branch on truthy.
+    """
+    if workflow_ids is None:
+        return None
+    if isinstance(workflow_ids, str):
+        workflow_ids = [workflow_ids]
+    if not isinstance(workflow_ids, (list, tuple)):
+        return None
+    seen: set[str] = set()
+    cleaned: List[str] = []
+    for item in workflow_ids:
+        if item is None:
+            continue
+        value = str(item).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    return cleaned or None
+
+
 def create_job(
     prompt: Optional[str],
     schedule: str,
@@ -496,6 +551,7 @@ def create_job(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     no_agent: bool = False,
+    workflow_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -574,6 +630,7 @@ def create_job(
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
+    normalized_workflow_ids = _normalize_workflow_ids(workflow_ids)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -627,6 +684,7 @@ def create_job(
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
+        "workflow_ids": normalized_workflow_ids,
     }
 
     jobs = load_jobs()
@@ -668,6 +726,12 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 updates["workdir"] = None
             else:
                 updates["workdir"] = _normalize_workdir(_wd)
+
+        # Normalize workflow_ids passthrough if present. Accept None / empty
+        # list to clear; otherwise canonicalize through the same helper used
+        # at create time so storage is consistent.
+        if "workflow_ids" in updates:
+            updates["workflow_ids"] = _normalize_workflow_ids(updates["workflow_ids"])
 
         updated = _apply_skill_fields({**job, **updates})
         schedule_changed = "schedule" in updates
