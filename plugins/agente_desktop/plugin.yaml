@@ -16,3 +16,5 @@ provides_tools:
   - save_triage_instructions
   - request_approval
   - get_office_context
+  - save_workflow_rule
+  - evaluate_triage_rules

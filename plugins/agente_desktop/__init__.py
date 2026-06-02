@@ -64,6 +64,9 @@ _TOOL_EMOJIS: dict[str, str] = {
     "start_workflow_run": "▶️",
     "get_run_status": "📊",
     "resume_paused_run": "⏯️",
+    # hermes-202606-002 additions
+    "save_workflow_rule": "📝",
+    "evaluate_triage_rules": "🧭",
 }
 
 
@@ -141,7 +144,7 @@ def _make_handler(tool_name: str):
 
 
 def register(ctx) -> None:
-    """Register the 18 Agente desktop tools.
+    """Register the 21 Agente desktop tools.
 
     Called once by the plugin loader when the plugin is enabled via
     ``plugins.enabled`` in config.yaml AND the ``agente-desktop`` toolset is
