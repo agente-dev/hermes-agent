@@ -12,6 +12,39 @@ from tools.cronjob_tools import (
 
 
 # =========================================================================
+# Inventory registration contract (hermes-202606-005)
+# =========================================================================
+#
+# Desktop wires cron actions via IPC and depends on the `cronjob` tool being
+# discoverable through the central tool registry. This contract pins:
+#   1. `cronjob` is auto-registered when the tools package is imported.
+#   2. All 6 documented actions (create, list, update, pause, resume,
+#      remove, run) are advertised in the schema description so the LLM
+#      surface and the desktop IPC layer agree on the action set.
+# Closes desktop-202605-304's hermes-side gate.
+
+class TestCronjobInventoryContract:
+    def test_cronjob_registered_in_tool_registry(self):
+        from tools.registry import registry
+        # Importing tools.cronjob_tools (at module top) is sufficient to
+        # trigger the self-registration `registry.register(...)` call.
+        assert registry.get_entry("cronjob") is not None
+        assert "cronjob" in registry.get_all_tool_names()
+        assert registry.get_toolset_for_tool("cronjob") == "cronjob"
+
+    def test_cronjob_schema_advertises_all_six_actions(self):
+        from tools.registry import registry
+        schema = registry.get_schema("cronjob")
+        assert schema is not None
+        description = schema.get("description", "")
+        for action in ("create", "list", "update", "pause", "resume", "remove", "run"):
+            assert action in description, (
+                f"action '{action}' missing from cronjob schema description — "
+                "desktop IPC + LLM surface must agree on the action set"
+            )
+
+
+# =========================================================================
 # Cron prompt scanning
 # =========================================================================
 
