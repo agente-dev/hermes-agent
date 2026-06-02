@@ -1687,6 +1687,16 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         return 0
 
     try:
+        # Workflow-YAML scheduler collapse (hermes-agent-202606-012):
+        # single tick also drives the desktop's office/workflows/*.yaml
+        # schedule triggers via the shared workflow_scheduler module.
+        # Fail-soft so a broken YAML never starves the main cron tick.
+        try:
+            from hermes_cli.workflow_cron_registry import run_workflow_tick
+            run_workflow_tick()
+        except Exception as exc:
+            logger.warning("workflow scheduler tick failed: %s", exc)
+
         due_jobs = get_due_jobs()
 
         if verbose and not due_jobs:
