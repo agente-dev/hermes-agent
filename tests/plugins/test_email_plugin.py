@@ -106,13 +106,19 @@ class TestListEmails:
 
 
 class TestReadEmail:
-    def test_passes_id_and_raw(self, email_plugin):
+    def test_passes_id_and_format_full(self, email_plugin):
+        """read_email must pass format=full via --params, NOT a bogus --raw CLI flag.
+
+        See hermes-agent-202606-027 — bundled gws v0.22.5 rejects --raw with
+        ``error: unexpected argument '--raw' found``.
+        """
         payload = {"id": "abc", "body": "שלום"}  # Hebrew round-trip
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed(json.dumps(payload, ensure_ascii=False))) as run:
             out = email_plugin.read_email(message_id="abc")
         argv = run.call_args[0][0]
-        expected_params = json.dumps({"userId": "me", "id": "abc"})
-        assert argv == ["/fake/bin/gws", "gmail", "users", "messages", "get", "--raw", "--params", expected_params]
+        expected_params = json.dumps({"userId": "me", "id": "abc", "format": "full"})
+        assert argv == ["/fake/bin/gws", "gmail", "users", "messages", "get", "--params", expected_params]
+        assert "--raw" not in argv
         assert out["body"] == "שלום"
 
 

@@ -87,9 +87,18 @@ def list_emails(folder: str = "INBOX", since: str | None = None, limit: int = 10
 
 
 def read_email(message_id: str) -> dict:
-    """Return full message payload for ``message_id`` (raw body preserved)."""
-    params = {"userId": "me", "id": message_id}
-    return _gws_json(["gmail", "users", "messages", "get", "--raw", "--params", json.dumps(params)])
+    """Return full message payload for ``message_id`` (parsed headers + decoded body parts).
+
+    Uses Gmail API ``format=full`` (passed via ``--params``) — returns headers and decoded
+    body parts ready for an LLM to consume. ``format=raw`` would return a base64url-encoded
+    RFC822 blob which the caller would have to decode separately. The previous
+    implementation passed ``--raw`` as a CLI flag, which does NOT exist on
+    ``gws users messages get`` (only ``--params``, ``--format`` for CLI output encoding,
+    etc.) — bundled gws v0.22.5 rejects it with ``error: unexpected argument '--raw'``.
+    See hermes-agent-202606-027.
+    """
+    params = {"userId": "me", "id": message_id, "format": "full"}
+    return _gws_json(["gmail", "users", "messages", "get", "--params", json.dumps(params)])
 
 
 def draft_reply(message_id: str, body: str) -> dict:
