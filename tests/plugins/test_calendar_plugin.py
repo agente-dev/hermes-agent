@@ -136,6 +136,27 @@ def test_gws_nonzero_exit_surfaces_runtime_error(tmp_path: Path, monkeypatch: py
         cp.list_calendar_events(after="today", before="today+1d")
 
 
+def test_gws_child_env_scrubs_google_workspace_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = tmp_path / "gws"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ -n \"$GOOGLE_WORKSPACE_CLI_CLIENT_SECRET\" ]; then\n"
+        "  echo '{\"has_secret\":true}'\n"
+        "else\n"
+        "  echo '{\"has_secret\":false}'\n"
+        "fi\n"
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("AGENTE_GWS_BIN", str(stub))
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CLIENT_SECRET", "do-not-forward")
+
+    event = cp.get_calendar_event(event_id="evt1")
+
+    assert event["has_secret"] is False
+
+
 def test_handler_translates_runtime_error_to_error_envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     failing = tmp_path / "gws"
     failing.write_text("#!/usr/bin/env bash\necho 'boom' >&2\nexit 3\n")

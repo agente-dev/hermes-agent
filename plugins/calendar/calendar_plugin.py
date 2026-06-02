@@ -25,6 +25,18 @@ logger = logging.getLogger(__name__)
 # redaction_expectations). Only event_id + start/end timestamps are safe in
 # non-debug logs.
 _SAFE_EVENT_LOG_FIELDS = ("id", "start", "end")
+_SAFE_CHILD_ENV_KEYS = (
+    "PATH",
+    "HOME",
+    "USER",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "AGENTE_GWS_BIN",
+)
+_SECRET_ENV_KEYS = {"GOOGLE_WORKSPACE_CLI_CLIENT_SECRET"}
 
 
 def _gws_bin() -> str:
@@ -38,6 +50,17 @@ def _gws_bin() -> str:
     # Defer the failure until call-time so import never raises in environments
     # where gws is intentionally absent (e.g. CI without the bundle).
     return "gws"
+
+
+def _gws_env() -> Dict[str, str]:
+    """Return a narrow child env without direct Google Workspace secret material."""
+    env = {key: os.environ[key] for key in _SAFE_CHILD_ENV_KEYS if key in os.environ}
+    for key, value in os.environ.items():
+        if key in _SECRET_ENV_KEYS:
+            continue
+        if key.startswith("GWS_") or key.startswith("GOOGLE_WORKSPACE_CLI_"):
+            env[key] = value
+    return env
 
 
 def _gws_json(args: List[str], timeout: float = 30.0) -> Any:
@@ -60,6 +83,7 @@ def _gws_json(args: List[str], timeout: float = 30.0) -> Any:
             text=True,
             timeout=timeout,
             check=False,
+            env=_gws_env(),
         )
     except FileNotFoundError as e:
         raise RuntimeError(f"gws binary not found at {cmd[0]!r}: {e}") from e
