@@ -1,0 +1,17 @@
+# Pack metadata for the aveeor-tama example pack.
+#
+# Packs may optionally declare a `default_prompt` here so routine builders that
+# start from a pack (rather than from a specific skill) can read a pack-authored
+# default prompt directly from Hermes instead of recreating pack logic outside
+# the runtime. The field is read by `agent.skill_utils.read_pack_metadata` and
+# surfaced in `_find_all_skills()` output as `pack_default_prompt`.
+#
+# This is the canonical example pack used by tests and by downstream
+# documentation. The prompt below is a synthetic placeholder so the schema
+# example does not couple the contract to any office-specific wording.
+name: aveeor-tama
+description: Canonical example pack demonstrating the optional pack-level default_prompt field.
+default_prompt: |
+  You are the default routine assistant for the aveeor-tama pack.
+  Read the user's request, choose the most appropriate skill in this pack,
+  and explain your plan before acting.
