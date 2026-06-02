@@ -18,7 +18,7 @@ Detection is intentionally conservative — false positives are preferable
 to false negatives for this class of incident. Callers that legitimately
 need to store such content (e.g. the operator explicitly asked to save a
 salary record for ONE of their OWN clients) must opt in via
-``allow_pii=True`` or by passing ``confirmed=True``.
+``allow_pii=True``.
 """
 
 from __future__ import annotations
@@ -28,10 +28,13 @@ from dataclasses import dataclass
 
 
 # Israeli national ID ("teudat zehut") — 9 digits, sometimes formatted
-# with a dash or space. We don't validate the check digit; we only detect
+# with dashes or spaces. We don't validate the check digit; we only detect
 # the shape that consistently appears in payslip / Form-106 OCR output.
-_IL_TZ_RE = re.compile(r"\bת\.?\s?ז\.?\s?\d{6,9}\b")
-_NINE_DIGIT_RE = re.compile(r"\b\d{9}\b")
+_ID_DIGITS_PATTERN = r"\d(?:[\s-]?\d){8}"
+_IL_TZ_RE = re.compile(
+    rf"(?:ת\.?\s*ז\.?|תעודת\s+זהות|מספר\s+זהות)\s*[:#-]?\s*{_ID_DIGITS_PATTERN}"
+)
+_NINE_DIGIT_RE = re.compile(rf"(?<!\d){_ID_DIGITS_PATTERN}(?!\d)")
 
 # Hebrew payslip / tax-form / salary vocabulary. Presence of TWO or more
 # of these alongside any numeric identifier or wage figure is a strong

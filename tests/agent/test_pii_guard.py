@@ -18,27 +18,27 @@ from agent.pii_guard import (
 
 # --- The bug payload --------------------------------------------------------
 #
-# This is a sanitised reproduction of the OCR'd content that triggered the
-# original incident (third-party payslip from a client's document folder).
+# Synthetic reproduction of the OCR shape that triggered the original
+# incident. Do not copy names, employers, or IDs from real source material.
 _PAYLOAD_PAYSLIP_HE = (
-    "תלוש שכר עבור ויצמן יוסי\n"
-    "ת.ז. 123456789\n"
-    "מעסיק: ו.ר.ד חשבונאות בע\"מ\n"
+    "תלוש שכר עבור עובד בדיקה\n"
+    "ת.ז. 000000000\n"
+    "מעסיק: חברת דוגמה בע\"מ\n"
     "ברוטו 12,500\nנטו 9,800\n"
     "ניכויי חובה: מס הכנסה, ביטוח לאומי, ביטוח בריאות\n"
 )
 
 _PAYLOAD_FORM_106_HE = (
     "טופס 106 לשנת 2022\n"
-    "ת.ז. 022224331\n"
-    "מעסיק: אחים רחמה בע\"מ\n"
+    "ת.ז. 111111111\n"
+    "מעסיק: מעסיק בדיקה בע\"מ\n"
     "ברוטו שנתי: 145,200\n"
 )
 
 _PAYLOAD_PAYSLIP_EN = (
     "Pay stub for John Doe\n"
     "Employer: Acme Corp\n"
-    "Tax ID 123456789\n"
+    "Tax ID 555555555\n"
     "Gross pay 5000\nNet pay 3800\n"
 )
 
@@ -52,6 +52,23 @@ def test_classify_flags_hebrew_payslip() -> None:
 def test_classify_flags_form_106() -> None:
     verdict = classify(_PAYLOAD_FORM_106_HE)
     assert verdict.is_pii
+
+
+def test_classify_flags_spaced_or_dashed_id_shapes() -> None:
+    spaced = (
+        "תלוש שכר\n"
+        "ת ז 222 222 222\n"
+        "מעסיק: חברת בדיקות\n"
+        "ברוטו 100\n"
+    )
+    dashed = (
+        "טופס 106\n"
+        "מספר זהות: 333-333-333\n"
+        "מעסיק: חברת בדיקות\n"
+        "נטו 80\n"
+    )
+    assert classify(spaced).is_pii
+    assert classify(dashed).is_pii
 
 
 def test_classify_flags_english_payslip() -> None:
