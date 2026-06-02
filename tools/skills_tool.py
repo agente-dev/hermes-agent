@@ -480,6 +480,31 @@ def _get_skill_source_from_scan_dir(scan_dir: Path) -> str:
     return "external"
 
 
+def _get_pack_dir_from_path(skill_path: Path) -> Optional[Path]:
+    """Return the pack (category) directory for ``skill_path``, if any.
+
+    Mirrors :func:`_get_category_from_path` but returns the resolved
+    ``Path`` of the category folder rather than its name, so callers can
+    look up pack-level metadata (e.g. ``pack.yaml``) without re-deriving
+    the path.
+    """
+    dirs_to_check = [SKILLS_DIR]
+    try:
+        from agent.skill_utils import get_external_skills_dirs
+        dirs_to_check.extend(get_external_skills_dirs())
+    except Exception:
+        pass
+    for skills_dir in dirs_to_check:
+        try:
+            rel_path = skill_path.relative_to(skills_dir)
+            parts = rel_path.parts
+            if len(parts) >= 3:
+                return skills_dir / parts[0]
+        except ValueError:
+            continue
+    return None
+
+
 def _parse_tags(tags_value) -> List[str]:
     """
     Parse tags from frontmatter value.
@@ -616,15 +641,36 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
 
                 category = _get_category_from_path(skill_md)
 
+                # Pack-level metadata is optional: read pack.yaml from the
+                # category directory and surface default_prompt when present
+                # so downstream consumers (e.g. /v1/skills, routine builders)
+                # can read pack-authored defaults without recreating pack
+                # logic outside Hermes. Packs without pack.yaml or without
+                # default_prompt simply omit the field — fully backward
+                # compatible with all existing packs.
+                pack_default_prompt: Optional[str] = None
+                try:
+                    pack_dir = _get_pack_dir_from_path(skill_md)
+                    if pack_dir is not None:
+                        from agent.skill_utils import get_pack_default_prompt
+                        pack_default_prompt = get_pack_default_prompt(pack_dir)
+                except Exception as e:
+                    logger.debug(
+                        "Failed to read pack metadata for %s: %s", skill_md, e
+                    )
+
                 seen_names.add(name)
-                skills.append({
+                entry: Dict[str, Any] = {
                     "name": name,
                     "description": description,
                     "path": str(skill_md),
                     "source": source,
                     "category": category,
                     "frontmatter": frontmatter,
-                })
+                }
+                if pack_default_prompt is not None:
+                    entry["pack_default_prompt"] = pack_default_prompt
+                skills.append(entry)
 
             except (UnicodeDecodeError, PermissionError) as e:
                 logger.debug("Failed to read skill file %s: %s", skill_md, e)

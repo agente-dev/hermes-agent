@@ -494,6 +494,82 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
 _NAMESPACE_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
+# ── Pack metadata ──────────────────────────────────────────────────────────
+
+# Cache keyed on (absolute pack.yaml path, mtime_ns) so repeated scans during a
+# single tool-registry pass do not re-parse the same YAML file. Pack files are
+# small (<1KB typical) but every category folder is checked once per skill
+# discovery, which adds up across ~120 skills in long-running sessions.
+_PACK_METADATA_CACHE: Dict[Tuple[str, int], Dict[str, Any]] = {}
+
+
+def _pack_metadata_cache_clear() -> None:
+    """Test hook — drop the in-process pack metadata cache."""
+    _PACK_METADATA_CACHE.clear()
+
+
+def read_pack_metadata(pack_dir: Path) -> Dict[str, Any]:
+    """Read optional ``pack.yaml`` metadata from a pack/category directory.
+
+    Packs are category-level groupings of skills (the directory one level above
+    each ``SKILL.md``). They may optionally declare a ``pack.yaml`` file with
+    pack-level metadata such as ``default_prompt`` for routine builders.
+
+    Returns an empty dict when:
+    - ``pack_dir`` is not a directory
+    - ``pack.yaml`` does not exist
+    - ``pack.yaml`` is empty, malformed, or not a YAML mapping
+
+    Never raises — pack metadata is strictly optional and a malformed file
+    must not break skill discovery.
+    """
+    try:
+        if not pack_dir or not pack_dir.is_dir():
+            return {}
+        pack_file = pack_dir / "pack.yaml"
+        if not pack_file.exists():
+            return {}
+        try:
+            stat = pack_file.stat()
+            cache_key = (str(pack_file), stat.st_mtime_ns)
+        except OSError:
+            cache_key = None  # type: ignore[assignment]
+        if cache_key is not None:
+            cached = _PACK_METADATA_CACHE.get(cache_key)
+            if cached is not None:
+                return dict(cached)
+        try:
+            parsed = yaml_load(pack_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.debug("Failed to parse pack.yaml at %s: %s", pack_file, exc)
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        if cache_key is not None:
+            _PACK_METADATA_CACHE[cache_key] = dict(parsed)
+        return parsed
+    except Exception as exc:
+        logger.debug("read_pack_metadata failed for %s: %s", pack_dir, exc)
+        return {}
+
+
+def get_pack_default_prompt(pack_dir: Path) -> Optional[str]:
+    """Return the pack-level ``default_prompt`` string, if any.
+
+    Reads ``pack.yaml`` via :func:`read_pack_metadata` and returns the
+    ``default_prompt`` value when it is a non-empty string. Returns ``None``
+    when the field is missing, blank, or not a string so callers can treat
+    the absence uniformly without distinguishing "missing" from "empty".
+    """
+    meta = read_pack_metadata(pack_dir)
+    if not meta:
+        return None
+    raw = meta.get("default_prompt")
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return None
+
+
 def parse_qualified_name(name: str) -> Tuple[Optional[str], str]:
     """Split ``'namespace:skill-name'`` into ``(namespace, bare_name)``.
 
