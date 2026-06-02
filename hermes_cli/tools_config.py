@@ -1139,11 +1139,15 @@ def _get_platform_tools(
                 # Opt-in plugin toolset — stay off until user picks it
                 continue
             elif (
-                has_platform_toolset_override
+                has_explicit_config
                 and pts in _PLUGIN_TOOLSETS_REQUIRE_EXPLICIT_SELECTION_WHEN_PLATFORM_CONFIGURED
             ):
-                # The platform has an explicit saved override. Do not widen it
-                # with Drive unless the user listed Drive in that override.
+                # The platform has explicit configurable-toolset selections
+                # saved (the user touched the TUI checklist). Do not widen that
+                # with Drive unless the user listed Drive in their selection.
+                # A composite-only list (e.g. ``["hermes-cli"]`` with no
+                # configurable keys) is NOT an explicit selection — it must
+                # behave like a fresh config and let Drive auto-enable.
                 continue
             elif pts not in known_for_platform:
                 # New plugin not yet seen by hermes tools — default enabled
