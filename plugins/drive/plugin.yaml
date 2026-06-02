@@ -1,0 +1,17 @@
+name: drive
+version: 0.1.0
+description: "Google Drive connector — thin subprocess wrapper around `gws drive`. Exposes drive_search and drive_get. OAuth and token storage owned entirely by gws (same auth path as the email + calendar plugins). Operator connects Drive via the desktop Connectors UI (`gws auth login -s gmail,calendar,drive`). Resolves the binary from AGENTE_GWS_BIN env var with a PATH fallback."
+author: agente.dev
+kind: backend
+platforms:
+  - linux
+  - macos
+  - windows
+scopes:
+  - drive
+operator_visible_surface:
+  - "Search Drive (חיפוש בדרייב)"
+  - "Get a single Drive file (הורדת קובץ מדרייב)"
+provides_tools:
+  - drive_search
+  - drive_get
