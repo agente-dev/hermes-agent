@@ -1309,6 +1309,15 @@ SOUL_EOF
             log_success "Skills copied to ~/.hermes/skills/"
         fi
     fi
+
+    # Seed source-classified manifest sidecar (.bundled_manifest.json) so
+    # downstream catalogs (e.g. agente-desktop Skills page) can render
+    # bundled-vs-hub-vs-user groupings READ-ONLY.  Desktop never writes
+    # ~/.hermes/skills/* itself (desktop boundary policy 2026-05-23); this
+    # runs from the Hermes/install side at install time only.
+    if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/tools/seed_bundled_skills.py" --hermes-home "$HERMES_HOME" --repo-root "$INSTALL_DIR" --quiet 2>/dev/null; then
+        log_success "Seeded ~/.hermes/skills/.bundled_manifest.json"
+    fi
 }
 
 install_node_deps() {

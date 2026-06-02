@@ -1,0 +1,11 @@
+{
+  "_comment": "Template for ~/.hermes/skills/.bundled_manifest enumeration. Rendered at install time by tools/seed_bundled_skills.py. v1 is read-only on the desktop side; this file is the authoritative source for which skills shipped with the install. Each entry records `source` so the desktop catalog can label/group bundled vs hub-installed vs user-authored skills without writing to ~/.hermes/skills/* itself.",
+  "_format_version": 1,
+  "_sources": [
+    "workspace-pack",
+    "hermes-skill",
+    "upstream-hermes-skill"
+  ],
+  "_legacy_text_file": "Co-emitted as ~/.hermes/skills/.bundled_manifest (one `name:sha256` per line) for backward compat with tools/skill_usage.py:_read_bundled_manifest_names.",
+  "skills": []
+}
