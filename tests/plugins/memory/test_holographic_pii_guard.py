@@ -46,6 +46,26 @@ def test_add_fact_allow_pii_bypass(tmp_path) -> None:
     assert fact_id > 0
 
 
+def test_update_fact_blocks_third_party_payslip(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memory_store.db")
+    fact_id = store.add_fact("Clean seed fact", category="general")
+
+    with pytest.raises(PIIWriteBlocked):
+        store.update_fact(fact_id, content=_PAYSLIP_PAYLOAD)
+
+    row = store._conn.execute(
+        "SELECT content FROM facts WHERE fact_id = ?", (fact_id,)
+    ).fetchone()
+    assert row["content"] == "Clean seed fact"
+
+
+def test_update_fact_allow_pii_bypass(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memory_store.db")
+    fact_id = store.add_fact("Clean seed fact", category="general")
+
+    assert store.update_fact(fact_id, content=_PAYSLIP_PAYLOAD, allow_pii=True)
+
+
 def test_add_fact_allows_innocuous_content(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memory_store.db")
     fact_id = store.add_fact(

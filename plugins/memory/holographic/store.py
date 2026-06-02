@@ -263,6 +263,8 @@ class MemoryStore:
         trust_delta: float | None = None,
         tags: str | None = None,
         category: str | None = None,
+        *,
+        allow_pii: bool = False,
     ) -> bool:
         """Partially update a fact. Trust is clamped to [0, 1].
 
@@ -279,8 +281,10 @@ class MemoryStore:
             params: list = []
 
             if content is not None:
+                content = content.strip()
+                _pii_guard_write(content, allow_pii=allow_pii)
                 assignments.append("content = ?")
-                params.append(content.strip())
+                params.append(content)
             if tags is not None:
                 assignments.append("tags = ?")
                 params.append(tags)
