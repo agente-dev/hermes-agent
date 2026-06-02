@@ -535,6 +535,62 @@ class ToolRegistry:
                 })
         return available, unavailable
 
+    # ------------------------------------------------------------------
+    # Manifest for external consumers (desktop AuditScreen etc.)
+    # ------------------------------------------------------------------
+
+    def _fallback_label(self, name: str) -> str:
+        """Human readable fallback when no explicit label_he provided."""
+        return name.replace("_", " ").title()
+
+    def get_tools_manifest(self) -> List[dict]:
+        """Return list of tool descriptors for /api/tools.
+
+        Includes name, label_he (with fallback), category (toolset fallback).
+        Seeds known audit-relevant tool names (ticket_*, message_sent, request_*)
+        so the consumer has stable labels even if the tools arrive via plugins
+        or are not yet registered in this process.
+        """
+        entries = self._snapshot_entries()
+        manifest: List[dict] = []
+        for e in sorted(entries, key=lambda x: x.name):
+            label = (getattr(e, "label_he", None) or "").strip() or self._fallback_label(e.name)
+            cat = (getattr(e, "category", None) or "").strip() or (e.toolset or "general")
+            item = {
+                "name": e.name,
+                "label_he": label,
+                "category": cat,
+            }
+            if getattr(e, "description", None):
+                # description_he reserved for future; keep shape stable
+                item["description_he"] = None
+            manifest.append(item)
+
+        # Seed / override for acceptance-criteria tools and any audit events
+        # that may be emitted by plugins not loaded in every process.
+        seeds = {
+            "ticket_create": {"label_he": "יצירת פנייה", "category": "tickets"},
+            "ticket_update": {"label_he": "עדכון פנייה", "category": "tickets"},
+            "message_sent": {"label_he": "הודעה נשלחה", "category": "messaging"},
+            "request_user_approval": {"label_he": "בקשת אישור", "category": "clarify"},
+            "request_user_input": {"label_he": "בקשת קלט", "category": "clarify"},
+        }
+        by_name = {m["name"]: m for m in manifest}
+        for name, data in seeds.items():
+            if name in by_name:
+                m = by_name[name]
+                if not m.get("label_he"):
+                    m["label_he"] = data["label_he"]
+                if not m.get("category"):
+                    m["category"] = data["category"]
+            else:
+                manifest.append({
+                    "name": name,
+                    "label_he": data["label_he"],
+                    "category": data["category"],
+                })
+        return sorted(manifest, key=lambda x: x["name"])
+
 
 # Module-level singleton
 registry = ToolRegistry()

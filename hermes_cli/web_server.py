@@ -3148,6 +3148,33 @@ async def promote_session_to_skill(session_id: str, body: PromoteSkillBody):
     return response
 
 
+@app.get("/api/tools")
+async def get_tools_manifest(request: Request):
+    """Return self-described tools with Hebrew labels + categories.
+
+    Used by desktop AuditScreen (and future surfaces) so the tool-name →
+    human label dictionary auto-updates when new tools are added via plugins
+    or core. Protected by the same _SESSION_TOKEN gate as reveal/oauth paths.
+
+    Shape (per issue hermes-agent-202606-001):
+      { "tools": [ {"name": "...", "label_he": "...", "category": "...", "description_he": null? }, ... ] }
+    """
+    _require_token(request)
+    try:
+        # Local import keeps web_server import cheap and avoids pulling the
+        # entire tool discovery tree at module load time for dashboard-only
+        # or gateway-only processes.
+        from tools.registry import registry as _tool_registry, discover_builtin_tools
+        # Ensure built-in tools have registered (idempotent; they call registry.register at import time).
+        # MCP plugins etc may add more at runtime.
+        discover_builtin_tools()
+        tools = _tool_registry.get_tools_manifest()
+        return {"tools": tools}
+    except Exception:
+        _log.exception("/api/tools manifest build failed")
+        raise HTTPException(status_code=500, detail="Failed to load tools manifest")
+
+
 @app.get("/api/tools/toolsets")
 async def get_toolsets():
     from hermes_cli.tools_config import (
