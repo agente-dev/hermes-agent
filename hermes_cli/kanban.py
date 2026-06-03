@@ -74,6 +74,11 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
     }
 
 
+def _print_pii_blocked(exc: kb.PIIWriteBlocked) -> None:
+    print(f"kanban: {exc}", file=sys.stderr)
+    print(f"kanban: error_he: {kb.PII_WRITE_BLOCKED_ERROR_HE}", file=sys.stderr)
+
+
 def _parse_workspace_flag(value: str) -> tuple[str, Optional[str]]:
     """Parse ``--workspace`` into ``(kind, path|None)``.
 
@@ -294,6 +299,9 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "two retries. Omit to use the dispatcher's "
                                "kanban.failure_limit config "
                                f"(default {kb.DEFAULT_FAILURE_LIMIT}).")
+    p_create.add_argument("--confirm-pii-write", action="store_true",
+                          help="Explicitly confirm that this task body may persist "
+                               "payroll, tax-form, or national-ID-like content.")
     p_create.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # --- list ---
@@ -392,6 +400,9 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_comment.add_argument("text", nargs="+", help="Comment body")
     p_comment.add_argument("--author", default=None,
                            help="Author name (default: $HERMES_PROFILE or 'user')")
+    p_comment.add_argument("--confirm-pii-write", action="store_true",
+                           help="Explicitly confirm that this comment may persist "
+                                "payroll, tax-form, or national-ID-like content.")
 
     p_complete = sub.add_parser("complete", help="Mark one or more tasks done")
     p_complete.add_argument("task_ids", nargs="+",
@@ -403,6 +414,9 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_complete.add_argument("--metadata", default=None,
                             help='JSON dict of structured facts (e.g. \'{"changed_files": [...], '
                                  '"tests_run": 12}\'). Stored on the closing run.')
+    p_complete.add_argument("--confirm-pii-write", action="store_true",
+                            help="Explicitly confirm that this completion handoff may persist "
+                                 "payroll, tax-form, or national-ID-like content.")
 
     p_edit = sub.add_parser(
         "edit",
@@ -424,12 +438,21 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         default=None,
         help="JSON dict of structured facts to store on the latest completed run.",
     )
+    p_edit.add_argument(
+        "--confirm-pii-write",
+        action="store_true",
+        help="Explicitly confirm that this edited result may persist "
+             "payroll, tax-form, or national-ID-like content.",
+    )
 
     p_block = sub.add_parser("block", help="Mark one or more tasks blocked")
     p_block.add_argument("task_id")
     p_block.add_argument("reason", nargs="*", help="Reason (also appended as a comment)")
     p_block.add_argument("--ids", nargs="+", default=None,
                          help="Additional task ids to block with the same reason (bulk mode)")
+    p_block.add_argument("--confirm-pii-write", action="store_true",
+                         help="Explicitly confirm that the block comment may persist "
+                              "payroll, tax-form, or national-ID-like content.")
 
     p_unblock = sub.add_parser("unblock", help="Return one or more blocked tasks to ready")
     p_unblock.add_argument("task_ids", nargs="+")
@@ -603,6 +626,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         default=None,
         help="Author name recorded on the audit comment "
              "(default: $HERMES_PROFILE or 'specifier')",
+    )
+    p_specify.add_argument(
+        "--confirm-pii-write",
+        action="store_true",
+        help="Explicitly confirm that the generated task body may persist "
+             "payroll, tax-form, or national-ID-like content.",
     )
     p_specify.add_argument(
         "--json",
@@ -1060,25 +1089,30 @@ def _cmd_create(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    with kb.connect() as conn:
-        task_id = kb.create_task(
-            conn,
-            title=args.title,
-            body=args.body,
-            assignee=args.assignee,
-            created_by=args.created_by or _profile_author(),
-            workspace_kind=ws_kind,
-            workspace_path=ws_path,
-            tenant=args.tenant,
-            priority=args.priority,
-            parents=tuple(args.parent or ()),
-            triage=bool(getattr(args, "triage", False)),
-            idempotency_key=getattr(args, "idempotency_key", None),
-            max_runtime_seconds=max_runtime,
-            skills=getattr(args, "skills", None) or None,
-            max_retries=max_retries,
-        )
-        task = kb.get_task(conn, task_id)
+    try:
+        with kb.connect() as conn:
+            task_id = kb.create_task(
+                conn,
+                title=args.title,
+                body=args.body,
+                assignee=args.assignee,
+                created_by=args.created_by or _profile_author(),
+                workspace_kind=ws_kind,
+                workspace_path=ws_path,
+                tenant=args.tenant,
+                priority=args.priority,
+                parents=tuple(args.parent or ()),
+                triage=bool(getattr(args, "triage", False)),
+                idempotency_key=getattr(args, "idempotency_key", None),
+                max_runtime_seconds=max_runtime,
+                skills=getattr(args, "skills", None) or None,
+                max_retries=max_retries,
+                allow_pii=bool(getattr(args, "confirm_pii_write", False)),
+            )
+            task = kb.get_task(conn, task_id)
+    except kb.PIIWriteBlocked as exc:
+        _print_pii_blocked(exc)
+        return 2
     if getattr(args, "json", False):
         print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
     else:
@@ -1514,8 +1548,18 @@ def _cmd_claim(args: argparse.Namespace) -> int:
 def _cmd_comment(args: argparse.Namespace) -> int:
     body = " ".join(args.text).strip()
     author = args.author or _profile_author()
-    with kb.connect() as conn:
-        kb.add_comment(conn, args.task_id, author, body)
+    try:
+        with kb.connect() as conn:
+            kb.add_comment(
+                conn,
+                args.task_id,
+                author,
+                body,
+                allow_pii=bool(getattr(args, "confirm_pii_write", False)),
+            )
+    except kb.PIIWriteBlocked as exc:
+        _print_pii_blocked(exc)
+        return 2
     print(f"Comment added to {args.task_id}")
     return 0
 
@@ -1563,13 +1607,19 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     failed: list[str] = []
     with kb.connect() as conn:
         for tid in ids:
-            if not kb.complete_task(
-                conn, tid,
-                result=args.result,
-                summary=summary,
-                metadata=metadata,
-                expected_run_id=_worker_run_id_for(tid),
-            ):
+            try:
+                ok = kb.complete_task(
+                    conn, tid,
+                    result=args.result,
+                    summary=summary,
+                    metadata=metadata,
+                    expected_run_id=_worker_run_id_for(tid),
+                    allow_pii=bool(getattr(args, "confirm_pii_write", False)),
+                )
+            except kb.PIIWriteBlocked as exc:
+                _print_pii_blocked(exc)
+                return 2
+            if not ok:
                 failed.append(tid)
                 print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
             else:
@@ -1589,13 +1639,19 @@ def _cmd_edit(args: argparse.Namespace) -> int:
             print(f"kanban: --metadata: {exc}", file=sys.stderr)
             return 2
     with kb.connect() as conn:
-        if not kb.edit_completed_task_result(
-            conn,
-            args.task_id,
-            result=args.result,
-            summary=getattr(args, "summary", None),
-            metadata=metadata,
-        ):
+        try:
+            ok = kb.edit_completed_task_result(
+                conn,
+                args.task_id,
+                result=args.result,
+                summary=getattr(args, "summary", None),
+                metadata=metadata,
+                allow_pii=bool(getattr(args, "confirm_pii_write", False)),
+            )
+        except kb.PIIWriteBlocked as exc:
+            _print_pii_blocked(exc)
+            return 2
+        if not ok:
             print(
                 f"cannot edit {args.task_id} (unknown id or task is not done)",
                 file=sys.stderr,
@@ -1613,12 +1669,23 @@ def _cmd_block(args: argparse.Namespace) -> int:
     with kb.connect() as conn:
         for tid in ids:
             if reason:
-                kb.add_comment(conn, tid, author, f"BLOCKED: {reason}")
+                try:
+                    kb.add_comment(
+                        conn,
+                        tid,
+                        author,
+                        f"BLOCKED: {reason}",
+                        allow_pii=bool(getattr(args, "confirm_pii_write", False)),
+                    )
+                except kb.PIIWriteBlocked as exc:
+                    _print_pii_blocked(exc)
+                    return 2
             if not kb.block_task(
                 conn,
                 tid,
                 reason=reason,
                 expected_run_id=_worker_run_id_for(tid),
+                allow_pii=bool(getattr(args, "confirm_pii_write", False)),
             ):
                 failed.append(tid)
                 print(f"cannot block {tid}", file=sys.stderr)
@@ -2084,7 +2151,11 @@ def _cmd_specify(args: argparse.Namespace) -> int:
     ok_count = 0
     fail_count = 0
     for tid in ids:
-        outcome = spec.specify_task(tid, author=author)
+        outcome = spec.specify_task(
+            tid,
+            author=author,
+            allow_pii=bool(getattr(args, "confirm_pii_write", False)),
+        )
         if outcome.ok:
             ok_count += 1
         else:

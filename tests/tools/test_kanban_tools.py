@@ -14,6 +14,15 @@ import os
 import pytest
 
 
+_PAYSLIP_BODY = (
+    "תלוש שכר עבור עובד בדיקה\n"
+    "ת.ז. 000000000\n"
+    "מעסיק: חברת דוגמה בע\"מ\n"
+    "ברוטו 12,500\n"
+    "נטו 9,800\n"
+)
+
+
 # ---------------------------------------------------------------------------
 # Gating
 # ---------------------------------------------------------------------------
@@ -169,6 +178,59 @@ def test_show_explicit_task_id(worker_env):
     assert d["task"]["id"] == other
 
 
+def test_kanban_create_blocks_payroll_pii_body(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out = kt._handle_create({
+        "title": "client document note",
+        "assignee": "peer",
+        "body": _PAYSLIP_BODY,
+    })
+    data = json.loads(out)
+    assert data["code"] == "pii_write_blocked"
+    assert data["error_he"]
+
+    with kb.connect() as conn:
+        tasks = kb.list_tasks(conn, include_archived=True)
+    assert [task.title for task in tasks] == ["worker-test"]
+
+
+def test_kanban_create_allows_pii_after_explicit_confirmation(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out = kt._handle_create({
+        "title": "confirmed payroll note",
+        "assignee": "peer",
+        "body": _PAYSLIP_BODY,
+        "confirm_pii_write": True,
+    })
+    data = json.loads(out)
+    assert data["ok"] is True
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, data["task_id"])
+    assert task is not None
+    assert task.body == _PAYSLIP_BODY
+
+
+def test_kanban_comment_blocks_payroll_pii_body(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out = kt._handle_comment({
+        "task_id": worker_env,
+        "body": _PAYSLIP_BODY,
+    })
+    data = json.loads(out)
+    assert data["code"] == "pii_write_blocked"
+    assert data["error_he"]
+
+    with kb.connect() as conn:
+        assert kb.list_comments(conn, worker_env) == []
+
+
 def test_list_filters_tasks(monkeypatch, worker_env):
     """kanban_list gives orchestrators filtered board discovery."""
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
@@ -318,6 +380,37 @@ def test_complete_with_result_only(worker_env):
     assert d["ok"] is True
 
 
+def test_complete_blocks_payroll_pii_handoff(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out = kt._handle_complete({"summary": _PAYSLIP_BODY})
+    data = json.loads(out)
+    assert data["code"] == "pii_write_blocked"
+    assert data["error_he"]
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, worker_env)
+    assert task.status == "running"
+
+
+def test_complete_allows_pii_after_explicit_confirmation(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out = kt._handle_complete({
+        "summary": _PAYSLIP_BODY,
+        "confirm_pii_write": True,
+    })
+    data = json.loads(out)
+    assert data["ok"] is True
+
+    with kb.connect() as conn:
+        run = kb.latest_run(conn, worker_env)
+    assert run is not None
+    assert run.summary == _PAYSLIP_BODY
+
+
 def test_complete_rejects_no_handoff(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_complete({})
@@ -328,6 +421,20 @@ def test_complete_rejects_non_dict_metadata(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_complete({"summary": "x", "metadata": [1, 2, 3]})
     assert json.loads(out).get("error")
+
+
+def test_block_blocks_payroll_pii_reason(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out = kt._handle_block({"reason": _PAYSLIP_BODY})
+    data = json.loads(out)
+    assert data["code"] == "pii_write_blocked"
+    assert data["error_he"]
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, worker_env)
+    assert task.status == "running"
 
 
 def test_complete_phantom_card_message_advertises_retry(worker_env):

@@ -55,6 +55,17 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _pii_http_exception(exc: kanban_db.PIIWriteBlocked) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={
+            "error": str(exc),
+            "code": "pii_write_blocked",
+            "error_he": kanban_db.PII_WRITE_BLOCKED_ERROR_HE,
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Auth helper — WebSocket only (HTTP routes live behind the dashboard's
 # existing plugin-bypass; this is documented above).
@@ -515,6 +526,7 @@ class CreateTaskBody(BaseModel):
     idempotency_key: Optional[str] = None
     max_runtime_seconds: Optional[int] = None
     skills: Optional[list[str]] = None
+    confirm_pii_write: bool = False
 
 
 @router.post("/tasks")
@@ -537,6 +549,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             idempotency_key=payload.idempotency_key,
             max_runtime_seconds=payload.max_runtime_seconds,
             skills=payload.skills,
+            allow_pii=payload.confirm_pii_write,
         )
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(task) if task else None}
@@ -555,6 +568,8 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
                 # Probe failure must never block the create itself.
                 pass
         return body
+    except kanban_db.PIIWriteBlocked as e:
+        raise _pii_http_exception(e)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -578,6 +593,7 @@ class UpdateTaskBody(BaseModel):
     # complete --summary ... --metadata ...``.
     summary: Optional[str] = None
     metadata: Optional[dict] = None
+    confirm_pii_write: bool = False
 
 
 @router.patch("/tasks/{task_id}")
@@ -610,9 +626,15 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     result=payload.result,
                     summary=payload.summary,
                     metadata=payload.metadata,
+                    allow_pii=payload.confirm_pii_write,
                 )
             elif s == "blocked":
-                ok = kanban_db.block_task(conn, task_id, reason=payload.block_reason)
+                ok = kanban_db.block_task(
+                    conn,
+                    task_id,
+                    reason=payload.block_reason,
+                    allow_pii=payload.confirm_pii_write,
+                )
             elif s == "ready":
                 # Re-open a blocked task, or just an explicit status set.
                 current = kanban_db.get_task(conn, task_id)
@@ -662,6 +684,13 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     sets.append("title = ?")
                     vals.append(payload.title.strip())
                 if payload.body is not None:
+                    try:
+                        kanban_db.guard_kanban_persistent_text(
+                            payload.body,
+                            allow_pii=payload.confirm_pii_write,
+                        )
+                    except kanban_db.PIIWriteBlocked as e:
+                        raise _pii_http_exception(e)
                     sets.append("body = ?")
                     vals.append(payload.body)
                 vals.append(task_id)
@@ -676,6 +705,8 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
 
         updated = kanban_db.get_task(conn, task_id)
         return {"task": _task_dict(updated) if updated else None}
+    except kanban_db.PIIWriteBlocked as e:
+        raise _pii_http_exception(e)
     finally:
         conn.close()
 
@@ -754,6 +785,7 @@ def _set_status_direct(
 class CommentBody(BaseModel):
     body: str
     author: Optional[str] = "dashboard"
+    confirm_pii_write: bool = False
 
 
 @router.post("/tasks/{task_id}/comments")
@@ -766,9 +798,15 @@ def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query
         if kanban_db.get_task(conn, task_id) is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
         kanban_db.add_comment(
-            conn, task_id, author=payload.author or "dashboard", body=payload.body,
+            conn,
+            task_id,
+            author=payload.author or "dashboard",
+            body=payload.body,
+            allow_pii=payload.confirm_pii_write,
         )
         return {"ok": True}
+    except kanban_db.PIIWriteBlocked as e:
+        raise _pii_http_exception(e)
     finally:
         conn.close()
 
@@ -823,6 +861,7 @@ class BulkTaskBody(BaseModel):
     result: Optional[str] = None
     summary: Optional[str] = None
     metadata: Optional[dict] = None
+    confirm_pii_write: bool = False
     reclaim_first: bool = False
 
 
@@ -859,6 +898,7 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                             result=payload.result,
                             summary=payload.summary,
                             metadata=payload.metadata,
+                            allow_pii=payload.confirm_pii_write,
                         )
                     elif s == "blocked":
                         ok = kanban_db.block_task(conn, tid)
@@ -903,6 +943,13 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                             (tid, json.dumps({"priority": int(payload.priority)}),
                              int(time.time())),
                         )
+            except kanban_db.PIIWriteBlocked as e:
+                entry.update(
+                    ok=False,
+                    error=str(e),
+                    code="pii_write_blocked",
+                    error_he=kanban_db.PII_WRITE_BLOCKED_ERROR_HE,
+                )
             except Exception as e:  # defensive — one bad id shouldn't kill the batch
                 entry.update(ok=False, error=str(e))
             results.append(entry)
