@@ -56,6 +56,8 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
+    # Workflow-rule store (per-connector automation rules; Hermes-canonical)
+    "save_workflow_rule", "list_workflow_rules",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -150,6 +152,12 @@ TOOLSETS = {
     "cronjob": {
         "description": "Cronjob management tool - create, list, update, pause, resume, remove, and trigger scheduled tasks",
         "tools": ["cronjob"],
+        "includes": []
+    },
+
+    "workflow_rules": {
+        "description": "Workflow-rule store: persist and list per-connector automation rules (Hermes-canonical JSON records under <HERMES_HOME>/workflow-rules/).",
+        "tools": ["save_workflow_rule", "list_workflow_rules"],
         "includes": []
     },
     
@@ -362,6 +370,8 @@ TOOLSETS = {
             "execute_code", "delegate_task",
             # Cronjob management
             "cronjob",
+            # Workflow-rule store
+            "save_workflow_rule", "list_workflow_rules",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
 
