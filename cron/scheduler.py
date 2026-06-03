@@ -1020,6 +1020,43 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
 
     # ---------------------------------------------------------------
+    # workflow-dispatch short-circuit — cron jobs created via /api/jobs
+    # with ``metadata.workflow_ids: [...]`` delegate execution to the
+    # workflow engine instead of spawning a plain LLM prompt. Per the
+    # routine_workflow_arch (meta-202606-008), cron fires → workflow
+    # executes; triage is a step inside the workflow, not the cron
+    # path. Plain-prompt jobs (no metadata, or metadata without
+    # workflow_ids) keep the legacy behavior unchanged — this branch
+    # only fires when workflow_ids is a non-empty list, and only
+    # short-circuits when at least one dispatch URL is configured. If
+    # workflow_ids are set but no dispatch URL is configured, we log a
+    # clear warning and fall through to the legacy path so installs
+    # that don't yet wire the workflow engine keep firing.
+    # ---------------------------------------------------------------
+    from cron.workflow_dispatch import (
+        dispatch_workflow_runs,
+        extract_workflow_ids,
+        resolve_dispatch_url,
+    )
+
+    workflow_ids = extract_workflow_ids(job)
+    if workflow_ids and resolve_dispatch_url():
+        ok, doc, err = dispatch_workflow_runs(job, workflow_ids)
+        final_response = (
+            f"Workflow run(s) started: {', '.join(workflow_ids)}"
+            if ok
+            else f"Workflow dispatch failed: {err}"
+        )
+        return ok, doc, final_response, (err or None)
+    elif workflow_ids:
+        logger.warning(
+            "Job '%s': workflow_ids=%s set but no dispatch URL configured "
+            "(HERMES_WORKFLOW_DISPATCH_URL / AGENTE_DESKTOP_BASE_URL); "
+            "falling back to legacy prompt-spawn path",
+            job_name, workflow_ids,
+        )
+
+    # ---------------------------------------------------------------
     # no_agent short-circuit — the script IS the job, no LLM involvement.
     # ---------------------------------------------------------------
     # This mirrors the classic "run a bash script on a timer, send its
