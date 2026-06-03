@@ -2827,7 +2827,7 @@ async def toggle_skill(body: SkillToggle):
 # (POST /api/sessions/{id}/promote-skill). Mirrors the cron HTTP surface
 # shape: no new abstraction, just an additional caller path into existing
 # primitives. See ``tools/skill_manager_tool.py`` and
-# ``agent/background_review.py``.
+# ``run_agent.AIAgent._SKILL_REVIEW_PROMPT``.
 # ---------------------------------------------------------------------------
 
 _PROMOTE_SKILL_MAX_TRANSCRIPT_CHARS = 6000
@@ -2874,6 +2874,62 @@ def _skill_create_response(payload: Dict[str, Any], slug: str) -> Dict[str, Any]
     return response
 
 
+def _message_text(message: Dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        return "\n".join(part for part in text_parts if part)
+    return ""
+
+
+def _append_unique(items: List[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
+
+
+def _derive_workflow_steps(messages: List[Dict[str, Any]]) -> List[str]:
+    """Derive non-verbatim workflow bullets from operator turns.
+
+    This is the HTTP-safe equivalent of the skill-review prompt's
+    class-level skill guidance: identify reusable procedure semantics,
+    not session-specific transcript text. It intentionally uses coarse
+    categories and sanitized keywords so persisted SKILL.md files do not
+    copy private chat content.
+    """
+    user_texts = [
+        _message_text(msg).strip()
+        for msg in messages
+        if isinstance(msg, dict) and msg.get("role") == "user"
+    ]
+    user_texts = [text for text in user_texts if text]
+    combined = " ".join(user_texts).lower()
+    steps: List[str] = []
+
+    if any(term in combined for term in ("inbox", "email", "emails", "message", "messages")):
+        _append_unique(steps, "Organize inbox or message items by sender, source, or topic.")
+    if any(term in combined for term in ("invoice", "invoices", "receipt", "receipts", "tax", "vendor")):
+        _append_unique(steps, "Identify finance-related documents and prepare them for tax review.")
+    if any(term in combined for term in ("newsletter", "newsletters", "archive", "archived")):
+        _append_unique(steps, "Archive low-priority recurring updates after confirming they are safe to move.")
+    if any(term in combined for term in ("schedule", "weekly", "daily", "morning", "monday", "tuesday", "wednesday", "thursday", "friday")):
+        _append_unique(steps, "Apply the operator-requested cadence before scheduling or repeating the workflow.")
+    if any(term in combined for term in ("document", "documents", "file", "files", "report", "reports")):
+        _append_unique(steps, "Gather the relevant documents, files, or reports before producing the result.")
+
+    if steps:
+        return steps
+
+    return [
+        "Reconstruct the reusable workflow from the current operator context without storing raw transcript text."
+    ]
+
+
 def _distill_transcript_to_skill_md(
     *,
     slug: str,
@@ -2881,22 +2937,18 @@ def _distill_transcript_to_skill_md(
     description: str,
     messages: List[Dict[str, Any]],
 ) -> str:
-    """Produce a minimal valid SKILL.md without copying transcript text.
+    """Produce a valid SKILL.md from transcript semantics.
 
-    The synchronous promote endpoint does NOT spawn a forked AIAgent
-    (that path costs an LLM round trip and an extra credential/runtime
-    inheritance dance — see ``AIAgent._spawn_background_review``). Instead
-    it applies the same class-level umbrella shape from the background
-    review prompt to an operator-explicit promotion request: create a new
-    reusable skill with the supplied slug/name and let later foreground or
-    curator edits refine the body. The result satisfies
-    ``_validate_frontmatter`` and is well-formed enough for ``/<slug>`` to
-    register on first reload.
+    The HTTP endpoint keeps the existing skill-review contract's
+    class-level umbrella shape while staying synchronous and deterministic:
+    it derives reusable workflow bullets from operator turns, uses the
+    operator-supplied slug/name as hints, and writes through
+    ``skill_manage(action="create")`` under the background-review origin.
 
     Sensitive evidence policy: per the intake, the promotion endpoint
-    must NOT serialise raw transcript content into the SKILL.md. We only
-    record aggregate counts so errors and persisted skills cannot leak
-    session content.
+    must NOT serialise raw transcript content into the SKILL.md. The
+    persisted skill records only non-verbatim workflow semantics and
+    aggregate counts.
     """
     user_turn_count = 0
     for msg in messages:
@@ -2907,6 +2959,10 @@ def _distill_transcript_to_skill_md(
         user_turn_count += 1
 
     reviewed_count = len(messages)
+    workflow_steps = _derive_workflow_steps(messages)
+    workflow_block = "\n".join(
+        f"{index}. {step}" for index, step in enumerate(workflow_steps, start=1)
+    )
 
     body = (
         f"# {display_name}\n\n"
@@ -2914,7 +2970,9 @@ def _distill_transcript_to_skill_md(
         "## When to invoke\n\n"
         f"Run this skill when the operator asks for the workflow named "
         f"'{display_name}' or invokes the slash command `/{slug}`.\n"
-        "\n## Steps\n\n"
+        "\n## Distilled Workflow\n\n"
+        f"{workflow_block}\n"
+        "\n## Operating Guardrails\n\n"
         "1. Confirm the operator's current goal matches the workflow above.\n"
         "2. Ask for any missing inputs needed to run the workflow safely.\n"
         "3. Surface intermediate results so the operator can intervene before any external side effect.\n"

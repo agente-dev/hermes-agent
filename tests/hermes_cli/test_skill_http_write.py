@@ -211,7 +211,9 @@ class TestPromoteSkillEndpoint:
         body = skill_md.read_text(encoding="utf-8")
         # Frontmatter rendered + slug used as `name:`
         assert "name: monday-inbox-sort" in body
-        # No raw transcript content is persisted into the generated SKILL.md.
+        # Workflow semantics are distilled without copying raw transcript text.
+        assert "Organize inbox or message items by sender" in body
+        assert "Identify finance-related documents" in body
         assert "every monday morning" not in body
         assert "mark vendor invoices" not in body
         assert "sorting now" not in body
@@ -330,6 +332,8 @@ class TestPromoteSkillEndpoint:
             json={"skill_slug": "dup-promoted"},
         )
         assert first.status_code == 200
+        promoted_body = Path(first.json()["skill_md"]).read_text(encoding="utf-8")
+        assert "confidential-customer-payload-xyz" not in promoted_body
         second = web_client.post(
             f"/api/sessions/{sid}/promote-skill",
             json={"skill_slug": "dup-promoted"},
