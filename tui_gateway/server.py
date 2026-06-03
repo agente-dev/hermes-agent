@@ -3615,6 +3615,291 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5004, str(e))
 
 
+# ── Methods: subscription OAuth (thin wrapper) ───────────────────────
+# Two JSON-RPC methods that drive the EXISTING Anthropic PKCE and
+# OpenAI Codex device-code flows already implemented in
+# agent.anthropic_adapter and hermes_cli.auth.  The desktop shell calls
+# `auth.start_subscription_oauth(provider)` then (for Anthropic)
+# `auth.submit_oauth_code(session_id, code)`.  Persistence reuses the
+# `hermes_cli.auth_commands.persist_*_oauth_credentials` helpers so the
+# credential pool stays the single source of truth.  No new OAuth
+# endpoints, client IDs, or refresh logic — the gateway is a thin UI
+# bridge per the operator delegation rule for Hermes-owned subscription
+# auth.
+_OAUTH_SUBSCRIPTION_TTL_S = 15 * 60
+_oauth_subscription_sessions: dict[str, dict] = {}
+_oauth_subscription_lock = threading.Lock()
+
+
+def _oauth_subscription_gc() -> None:
+    now = time.time()
+    with _oauth_subscription_lock:
+        expired = [
+            sid
+            for sid, s in _oauth_subscription_sessions.items()
+            if s.get("expires_at", 0) < now
+        ]
+        for sid in expired:
+            _oauth_subscription_sessions.pop(sid, None)
+
+
+def _oauth_label(provider: str) -> str:
+    """Hebrew label for clarify.request / error_he payloads."""
+    if provider == "anthropic":
+        return "מנוי Claude Pro/Max"
+    if provider == "openai-codex":
+        return "מנוי ChatGPT Plus/Pro"
+    return provider
+
+
+@method("auth.start_subscription_oauth")
+def _(rid, params: dict) -> dict:
+    """Start a Hermes-native subscription OAuth flow.
+
+    Params: ``provider`` — one of ``anthropic``, ``openai-codex``.
+    Returns:
+      - Anthropic (PKCE): ``{flow:"pkce", session_id, auth_url, provider}``
+        — caller opens the URL, prompts for the pasted code, then calls
+        ``auth.submit_oauth_code``.  We additionally emit a
+        ``clarify.request`` event so any subscriber can drive the paste
+        through the standard clarify channel.
+      - Codex (device-code): ``{flow:"device_code", session_id, user_code,
+        verification_uri, provider}`` — caller shows the code, we spawn
+        a background poll-and-persist thread; completion is reported via
+        an ``auth.subscription_oauth.completed`` event.
+    """
+    _oauth_subscription_gc()
+
+    provider = (params.get("provider") or "").strip().lower()
+    if provider == "claude":
+        provider = "anthropic"
+    if provider in {"codex", "openai", "chatgpt"}:
+        provider = "openai-codex"
+
+    if provider not in {"anthropic", "openai-codex"}:
+        return _err(
+            rid,
+            4001,
+            f"unsupported subscription oauth provider: {provider}",
+        )
+
+    session_id = uuid.uuid4().hex
+    expires_at = time.time() + _OAUTH_SUBSCRIPTION_TTL_S
+
+    if provider == "anthropic":
+        try:
+            from agent.anthropic_adapter import build_anthropic_authorize_url
+        except Exception as exc:
+            return _err(rid, 5001, f"anthropic adapter unavailable: {exc}")
+        built = build_anthropic_authorize_url()
+        with _oauth_subscription_lock:
+            _oauth_subscription_sessions[session_id] = {
+                "provider": provider,
+                "expires_at": expires_at,
+                "code_verifier": built["code_verifier"],
+                "state": built["state"],
+            }
+        result = {
+            "flow": "pkce",
+            "session_id": session_id,
+            "auth_url": built["auth_url"],
+            "provider": provider,
+            "label_he": _oauth_label(provider),
+        }
+        # Mirror the paste step over clarify.request so any subscriber
+        # (renderer, TUI, automated test) can resolve it without polling.
+        # Using the session_id as the synthetic sid keeps event routing
+        # tied to this OAuth attempt and avoids cross-talk with a real
+        # chat session.
+        _emit(
+            "clarify.request",
+            session_id,
+            {
+                "question": "Authorization code",
+                "question_he": "הדבק את קוד ההרשאה כדי לחבר את " + _oauth_label(provider),
+                "kind": "oauth_code",
+                "provider": provider,
+                "auth_url": built["auth_url"],
+            },
+        )
+        return _ok(rid, result)
+
+    # provider == "openai-codex"
+    try:
+        from hermes_cli.auth import codex_request_device_code
+    except Exception as exc:
+        return _err(rid, 5001, f"codex auth module unavailable: {exc}")
+    try:
+        device = codex_request_device_code()
+    except Exception as exc:
+        return _err(
+            rid,
+            5002,
+            f"device code request failed: {exc} (error_he: כשל בקבלת קוד מחיבור ל-{_oauth_label(provider)})",
+        )
+
+    with _oauth_subscription_lock:
+        _oauth_subscription_sessions[session_id] = {
+            "provider": provider,
+            "expires_at": expires_at,
+            "device_auth_id": device["device_auth_id"],
+            "user_code": device["user_code"],
+            "poll_interval": device["poll_interval"],
+            "status": "pending",
+        }
+
+    def _bg_poll(sid: str, dev: dict) -> None:
+        try:
+            from hermes_cli.auth import codex_poll_and_exchange
+            from hermes_cli.auth_commands import persist_codex_oauth_credentials
+
+            creds = codex_poll_and_exchange(
+                device_auth_id=dev["device_auth_id"],
+                user_code=dev["user_code"],
+                poll_interval=int(dev.get("poll_interval", 5)),
+            )
+            entry = persist_codex_oauth_credentials(creds)
+            with _oauth_subscription_lock:
+                state = _oauth_subscription_sessions.get(sid)
+                if state is not None:
+                    state["status"] = "completed"
+                    state["label"] = entry.label
+            _emit(
+                "auth.subscription_oauth.completed",
+                sid,
+                {
+                    "provider": "openai-codex",
+                    "status": "ok",
+                    "label": entry.label,
+                },
+            )
+        except Exception as exc:
+            with _oauth_subscription_lock:
+                state = _oauth_subscription_sessions.get(sid)
+                if state is not None:
+                    state["status"] = "error"
+                    state["error"] = str(exc)
+            _emit(
+                "auth.subscription_oauth.completed",
+                sid,
+                {
+                    "provider": "openai-codex",
+                    "status": "error",
+                    "error": str(exc),
+                    "error_he": "ההתחברות ל" + _oauth_label("openai-codex") + " נכשלה",
+                },
+            )
+
+    threading.Thread(
+        target=_bg_poll,
+        args=(session_id, dict(device)),
+        daemon=True,
+        name=f"codex-oauth-poll-{session_id[:8]}",
+    ).start()
+
+    return _ok(
+        rid,
+        {
+            "flow": "device_code",
+            "session_id": session_id,
+            "user_code": device["user_code"],
+            "verification_uri": device["verification_uri"],
+            "provider": provider,
+            "label_he": _oauth_label(provider),
+        },
+    )
+
+
+@method("auth.submit_oauth_code")
+def _(rid, params: dict) -> dict:
+    """Submit a pasted PKCE authorization code (Anthropic flow only).
+
+    Codex device-code completes via background poll; calling this method
+    with a Codex session is a no-op that returns the current status.
+    """
+    _oauth_subscription_gc()
+    session_id = (params.get("session_id") or "").strip()
+    code = (params.get("code") or "").strip()
+    if not session_id:
+        return _err(rid, 4002, "session_id required")
+
+    with _oauth_subscription_lock:
+        state = _oauth_subscription_sessions.get(session_id)
+        if state is None:
+            return _err(
+                rid,
+                4040,
+                "subscription oauth session not found or expired (error_he: ההפעלה פגה או לא נמצאה)",
+            )
+        provider = state.get("provider", "")
+
+    if provider == "openai-codex":
+        # Caller doesn't need to submit anything for device-code; report
+        # current background status so the desktop UI can poll if it
+        # missed the completion event.
+        return _ok(
+            rid,
+            {
+                "provider": provider,
+                "status": state.get("status", "pending"),
+                "label": state.get("label"),
+                "error": state.get("error"),
+            },
+        )
+
+    if provider != "anthropic":
+        return _err(rid, 4001, f"unsupported provider for submit: {provider}")
+
+    if not code:
+        return _err(rid, 4003, "code required (error_he: קוד הרשאה חסר)")
+
+    try:
+        from agent.anthropic_adapter import exchange_anthropic_oauth_code
+        from hermes_cli.auth_commands import persist_anthropic_oauth_credentials
+    except Exception as exc:
+        return _err(rid, 5001, f"anthropic adapter unavailable: {exc}")
+
+    creds = exchange_anthropic_oauth_code(
+        code,
+        state["code_verifier"],
+        state["state"],
+    )
+    if not creds:
+        return _err(
+            rid,
+            5003,
+            "anthropic oauth token exchange failed (error_he: החלפת קוד ההרשאה נכשלה)",
+        )
+
+    try:
+        entry = persist_anthropic_oauth_credentials(creds)
+    except Exception as exc:
+        return _err(rid, 5004, f"persist failed: {exc} (error_he: שמירת ההרשאה נכשלה)")
+
+    with _oauth_subscription_lock:
+        # One-shot: drop the verifier so a leaked session_id can't replay.
+        _oauth_subscription_sessions.pop(session_id, None)
+
+    _emit(
+        "auth.subscription_oauth.completed",
+        session_id,
+        {
+            "provider": provider,
+            "status": "ok",
+            "label": entry.label,
+        },
+    )
+
+    return _ok(
+        rid,
+        {
+            "provider": provider,
+            "status": "ok",
+            "label": entry.label,
+        },
+    )
+
+
 # ── Methods: config ──────────────────────────────────────────────────
 
 
