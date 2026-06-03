@@ -398,6 +398,75 @@ def auth_add_command(args) -> None:
     raise SystemExit(f"`hermes auth add {provider}` is not implemented for auth type {requested_type} yet.")
 
 
+# ── Gateway-facing OAuth persistence helpers ────────────────────────
+# These reuse the exact PooledCredential write-paths used by
+# ``auth_add_command`` above so the tui_gateway thin wrapper does not
+# re-implement storage or duplicate credential blocks on disk.
+
+
+def persist_anthropic_oauth_credentials(
+    creds: dict,
+    *,
+    label: str | None = None,
+) -> "PooledCredential":
+    """Persist a freshly exchanged Anthropic PKCE credential to the pool.
+
+    ``creds`` must match the shape returned by
+    ``agent.anthropic_adapter.exchange_anthropic_oauth_code`` —
+    ``{access_token, refresh_token, expires_at_ms}``.
+    """
+    provider = "anthropic"
+    pool = load_pool(provider)
+    resolved_label = (label or "").strip() or label_from_token(
+        creds.get("access_token", ""),
+        _oauth_default_label(provider, len(pool.entries()) + 1),
+    )
+    entry = PooledCredential(
+        provider=provider,
+        id=uuid.uuid4().hex[:6],
+        label=resolved_label,
+        auth_type=AUTH_TYPE_OAUTH,
+        priority=0,
+        source=f"{SOURCE_MANUAL}:hermes_pkce",
+        access_token=creds.get("access_token", ""),
+        refresh_token=creds.get("refresh_token"),
+        expires_at_ms=creds.get("expires_at_ms"),
+        base_url=_provider_base_url(provider),
+    )
+    pool.add_entry(entry)
+    return entry
+
+
+def persist_codex_oauth_credentials(
+    creds: dict,
+    *,
+    label: str | None = None,
+) -> "PooledCredential":
+    """Persist a freshly exchanged Codex device-code credential.
+
+    ``creds`` must match the shape returned by
+    ``hermes_cli.auth.codex_poll_and_exchange``.
+    """
+    provider = "openai-codex"
+    pool = load_pool(provider)
+    resolved_label = (label or "").strip() or label_from_token(
+        creds.get("tokens", {}).get("access_token", ""),
+        _oauth_default_label(provider, len(pool.entries()) + 1),
+    )
+    auth_mod._save_codex_tokens(
+        creds["tokens"],
+        last_refresh=creds.get("last_refresh"),
+        label=resolved_label,
+    )
+    pool = load_pool(provider)
+    entry = next((item for item in pool.entries() if item.source == "device_code"), None)
+    # _save_codex_tokens always materializes one device_code entry; the
+    # caller relies on the returned label for the gateway UI confirmation.
+    if entry is None:  # pragma: no cover — defensive
+        raise RuntimeError("Codex token persisted but device_code pool entry missing")
+    return entry
+
+
 def auth_list_command(args) -> None:
     provider_filter = _normalize_provider(getattr(args, "provider", "") or "")
     if provider_filter:
