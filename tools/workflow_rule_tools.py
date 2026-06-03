@@ -1,21 +1,34 @@
-"""Workflow-rule save/load tools.
+"""DEPRECATED — workflow rules superseded by workflow + routine primitives.
 
-Exposes two Hermes tools — ``save_workflow_rule`` and ``list_workflow_rules``
-— that persist per-rule JSON records to ``<HERMES_HOME>/workflow-rules/<id>.json``.
-Establishes Hermes as the source of truth for workflow rules before desktop
-or any other surface wires UI editors that round-trip the same records.
+This module previously exposed ``save_workflow_rule`` and
+``list_workflow_rules`` as Hermes tools that persisted per-rule JSON
+records. The 2026-06 pivot (hermes-agent-202606-028 / desktop-202606-514)
+collapsed automation onto three primitives — **connector**, **workflow**,
+**routine** — and removed the standalone "rule" entity from the operator
+chat surface entirely.
+
+The Python helpers and the on-disk storage layer
+(``tools/workflow_rules_storage.py``) are retained so any background
+migration code that still references them can read existing
+workflow-rules JSON. The two LLM-visible tools, however, are gone:
+calling ``save_workflow_rule_handler`` or ``list_workflow_rules_handler``
+now raises ``RuntimeError`` to surface the deprecation loudly during
+tests, and the tools are no longer registered with the tool registry.
+
+Use ``save_workflow`` + ``create_routine`` (see
+``tools/workflow_routine_tools.py``) instead.
 """
 
 from __future__ import annotations
 
-import json
-import logging
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from tools.registry import registry, tool_error
-from tools.workflow_rules_storage import list_rules, save_rule
 
-logger = logging.getLogger(__name__)
+_DEPRECATION_MESSAGE = (
+    "DEPRECATED: save_workflow_rule / list_workflow_rules have been removed. "
+    "Use save_workflow + create_routine — see "
+    "hermes-agent-202606-028 / desktop-202606-514."
+)
 
 
 def save_workflow_rule_handler(
@@ -27,128 +40,32 @@ def save_workflow_rule_handler(
     enabled: bool = True,
     created_by_session_id: Optional[str] = None,
 ) -> str:
-    record: Dict[str, Any] = {
-        "id": id,
-        "connector_id": connector_id,
-        "rule_natural_language": rule_natural_language,
-        "matcher_pattern": matcher_pattern or "",
-        "target_ticket_template": target_ticket_template or "",
-        "enabled": bool(enabled),
-        "created_by_session_id": created_by_session_id,
-    }
-    try:
-        saved = save_rule(record)
-    except ValueError as exc:
-        return tool_error(str(exc), success=False)
-    except OSError as exc:
-        logger.exception("save_workflow_rule failed for id=%s", id)
-        return tool_error(f"failed to persist workflow rule: {exc}", success=False)
-
-    return json.dumps(
-        {"success": True, "rule": saved},
-        ensure_ascii=False,
-    )
+    raise RuntimeError(_DEPRECATION_MESSAGE)
 
 
 def list_workflow_rules_handler(connector_id: Optional[str] = None) -> str:
-    try:
-        rules = list_rules(connector_id=connector_id)
-    except OSError as exc:
-        logger.exception("list_workflow_rules failed (connector_id=%s)", connector_id)
-        return tool_error(f"failed to read workflow rules: {exc}", success=False)
-    return json.dumps(
-        {"success": True, "rules": rules, "count": len(rules)},
-        ensure_ascii=False,
-    )
+    raise RuntimeError(_DEPRECATION_MESSAGE)
 
 
-SAVE_WORKFLOW_RULE_SCHEMA = {
+# Schemas retained as constants so any caller that inspected them at
+# import time keeps a defined value. The objects are intentionally minimal
+# — the tools are no longer registered.
+SAVE_WORKFLOW_RULE_SCHEMA: dict[str, Any] = {
     "name": "save_workflow_rule",
-    "description": (
-        "Persist a workflow rule (per-connector automation rule) as a JSON "
-        "record under <HERMES_HOME>/workflow-rules/<id>.json. Hermes is the "
-        "canonical writer for these records — desktop and other surfaces "
-        "treat the on-disk store as the source of truth."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "id": {
-                "type": "string",
-                "description": "Stable id for the rule (filesystem-safe: [A-Za-z0-9_-]{1,128}).",
-            },
-            "connector_id": {
-                "type": "string",
-                "description": "Connector this rule binds to (e.g. a WhatsApp/email connector id).",
-            },
-            "rule_natural_language": {
-                "type": "string",
-                "description": "The user's own description of the rule in their own language (Hebrew round-trips cleanly).",
-            },
-            "matcher_pattern": {
-                "type": "string",
-                "description": "Opaque matcher description (regex, semantic phrase, structured selector).",
-            },
-            "target_ticket_template": {
-                "type": "string",
-                "description": "Template id or inline template body for the ticket spawned when the matcher fires.",
-            },
-            "enabled": {
-                "type": "boolean",
-                "default": True,
-                "description": "Whether the rule is active.",
-            },
-            "created_by_session_id": {
-                "type": "string",
-                "description": "Provenance — the session that created or last edited the rule.",
-            },
-        },
-        "required": ["id", "connector_id", "rule_natural_language"],
-    },
+    "deprecated": True,
+    "description": _DEPRECATION_MESSAGE,
+    "parameters": {"type": "object", "properties": {}},
 }
 
 
-LIST_WORKFLOW_RULES_SCHEMA = {
+LIST_WORKFLOW_RULES_SCHEMA: dict[str, Any] = {
     "name": "list_workflow_rules",
-    "description": (
-        "List workflow rules persisted under <HERMES_HOME>/workflow-rules/. "
-        "Optionally filter by connector_id."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "connector_id": {
-                "type": "string",
-                "description": "If set, return only rules whose connector_id matches exactly.",
-            },
-        },
-    },
+    "deprecated": True,
+    "description": _DEPRECATION_MESSAGE,
+    "parameters": {"type": "object", "properties": {}},
 }
 
 
-registry.register(
-    name="save_workflow_rule",
-    toolset="workflow_rules",
-    schema=SAVE_WORKFLOW_RULE_SCHEMA,
-    handler=lambda args, **_kw: save_workflow_rule_handler(
-        id=args.get("id", ""),
-        connector_id=args.get("connector_id", ""),
-        rule_natural_language=args.get("rule_natural_language", ""),
-        matcher_pattern=args.get("matcher_pattern"),
-        target_ticket_template=args.get("target_ticket_template"),
-        enabled=args.get("enabled", True),
-        created_by_session_id=args.get("created_by_session_id"),
-    ),
-    emoji="📋",
-)
-
-
-registry.register(
-    name="list_workflow_rules",
-    toolset="workflow_rules",
-    schema=LIST_WORKFLOW_RULES_SCHEMA,
-    handler=lambda args, **_kw: list_workflow_rules_handler(
-        connector_id=args.get("connector_id"),
-    ),
-    emoji="📋",
-)
+# No registry.register() calls — the deprecation is enforced by removing
+# the tool from the LLM-visible surface entirely. See toolsets.py and
+# model_tools.py for the matching removals.
