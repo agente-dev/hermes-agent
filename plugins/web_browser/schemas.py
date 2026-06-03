@@ -36,7 +36,7 @@ BROWSER_NAVIGATE_SCHEMA = _tool(
     {
         "type": "object",
         "properties": {
-            "url": {"type": "string", "description": "Full URL to open (https:// or http://)."},
+            "url": {"type": "string", "description": "Full URL to open (https:// or http://)."},  # windows-footgun: ok  (string literal, not an open() call)
             "task": {
                 "type": "string",
                 "description": "Optional natural-language description of what the agent wants to accomplish; passed to `--task` so cloud browser providers can show it in their dashboards.",

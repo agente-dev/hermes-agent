@@ -2849,6 +2849,16 @@ class APIServerAdapter(BasePlatformAdapter):
                 kwargs["skills"] = skills
             if repeat is not None:
                 kwargs["repeat"] = repeat
+            # Forward workflow_ids so routine → cron → workflow dispatch
+            # works end-to-end. The Desktop ScheduleDispatcher posts a
+            # top-level ``workflow_ids`` list (per
+            # ``electron/main/routines-ipc.ts``); without this passthrough
+            # the cron scheduler's workflow-dispatch branch never sees
+            # them and silently falls back to the legacy prompt-spawn
+            # path (hermes-cron-e2e-005).
+            workflow_ids = body.get("workflow_ids")
+            if workflow_ids is not None:
+                kwargs["workflow_ids"] = workflow_ids
 
             job = _cron_create(**kwargs)
             return web.json_response({"job": job})
