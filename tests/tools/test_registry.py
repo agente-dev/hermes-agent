@@ -320,7 +320,7 @@ class TestBuiltinDiscovery:
             "tools.tts_tool",
             "tools.vision_tools",
             "tools.web_tools",
-            "tools.workflow_rule_tools",
+            "tools.workflow_routine_tools",
             "tools.yuanbao_tools",
         }
 
