@@ -1050,10 +1050,20 @@ def _generate_pkce() -> tuple:
     return verifier, challenge
 
 
-def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
-    """Run Hermes-native OAuth PKCE flow and return credential state."""
-    import time
-    import webbrowser
+def build_anthropic_authorize_url() -> Dict[str, str]:
+    """Pure helper: build a fresh PKCE authorize URL + verifier.
+
+    Returns ``{auth_url, code_verifier, state}``.  Used by both the CLI
+    interactive flow (``run_hermes_oauth_login_pure``) and the gateway
+    JSON-RPC method ``auth.start_subscription_oauth`` so the OAuth client
+    logic lives in exactly one place.
+
+    Matches Hermes's pattern of using the PKCE verifier as the OAuth
+    ``state`` parameter (Claude's paste flow returns ``<code>#<state>``
+    where ``state`` echoes whatever value the client sent).  Callers
+    MUST keep verifier and state consistent.
+    """
+    from urllib.parse import urlencode as _urlencode
 
     verifier, challenge = _generate_pkce()
 
@@ -1067,9 +1077,92 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
         "code_challenge_method": "S256",
         "state": verifier,
     }
-    from urllib.parse import urlencode
+    auth_url = f"https://claude.ai/oauth/authorize?{_urlencode(params)}"
+    return {"auth_url": auth_url, "code_verifier": verifier, "state": verifier}
 
-    auth_url = f"https://claude.ai/oauth/authorize?{urlencode(params)}"
+
+def exchange_anthropic_oauth_code(
+    code: str,
+    code_verifier: str,
+    state: str,
+    received_state: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Pure helper: exchange a PKCE authorization code for tokens.
+
+    ``code`` may be a raw code, or the Claude-Pro paste format
+    ``<code>#<state>``.  If ``received_state`` is omitted we parse it
+    from the paste; ``state`` is the value we issued at authorize time
+    (here equal to ``code_verifier``).  Returns
+    ``{access_token, refresh_token, expires_at_ms}`` or ``None`` on
+    failure.
+    """
+    import time as _time
+    import urllib.request as _urlreq
+
+    raw = (code or "").strip()
+    if not raw:
+        return None
+    if received_state is None:
+        splits = raw.split("#")
+        code_part = splits[0]
+        received_state_part = splits[1] if len(splits) > 1 else ""
+    else:
+        code_part = raw
+        received_state_part = received_state
+
+    if received_state_part != state:
+        logger.warning("OAuth state mismatch — possible CSRF, aborting")
+        return None
+
+    try:
+        exchange_data = json.dumps({
+            "grant_type": "authorization_code",
+            "client_id": _OAUTH_CLIENT_ID,
+            "code": code_part,
+            "state": received_state_part,
+            "redirect_uri": _OAUTH_REDIRECT_URI,
+            "code_verifier": code_verifier,
+        }).encode()
+
+        req = _urlreq.Request(
+            _OAUTH_TOKEN_URL,
+            data=exchange_data,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": f"claude-cli/{_get_claude_code_version()} (external, cli)",
+            },
+            method="POST",
+        )
+
+        with _urlreq.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode())
+    except Exception as e:
+        logger.warning("Anthropic OAuth token exchange failed: %s", e)
+        return None
+
+    access_token = result.get("access_token", "")
+    refresh_token = result.get("refresh_token", "")
+    expires_in = result.get("expires_in", 3600)
+
+    if not access_token:
+        return None
+
+    expires_at_ms = int(_time.time() * 1000) + (expires_in * 1000)
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_at_ms": expires_at_ms,
+    }
+
+
+def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
+    """Run Hermes-native OAuth PKCE flow and return credential state."""
+    import webbrowser
+
+    built = build_anthropic_authorize_url()
+    auth_url = built["auth_url"]
+    verifier = built["code_verifier"]
+    issued_state = built["state"]
 
     print()
     print("Authorize Hermes with your Claude Pro/Max subscription.")
@@ -1100,52 +1193,11 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
         print("No code entered.")
         return None
 
-    splits = auth_code.split("#")
-    code = splits[0]
-    state = splits[1] if len(splits) > 1 else ""
-
-    try:
-        import urllib.request
-
-        exchange_data = json.dumps({
-            "grant_type": "authorization_code",
-            "client_id": _OAUTH_CLIENT_ID,
-            "code": code,
-            "state": state,
-            "redirect_uri": _OAUTH_REDIRECT_URI,
-            "code_verifier": verifier,
-        }).encode()
-
-        req = urllib.request.Request(
-            _OAUTH_TOKEN_URL,
-            data=exchange_data,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": f"claude-cli/{_get_claude_code_version()} (external, cli)",
-            },
-            method="POST",
-        )
-
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode())
-    except Exception as e:
-        print(f"Token exchange failed: {e}")
+    creds = exchange_anthropic_oauth_code(auth_code, verifier, issued_state)
+    if not creds:
+        print("Token exchange failed.")
         return None
-
-    access_token = result.get("access_token", "")
-    refresh_token = result.get("refresh_token", "")
-    expires_in = result.get("expires_in", 3600)
-
-    if not access_token:
-        print("No access token in response.")
-        return None
-
-    expires_at_ms = int(time.time() * 1000) + (expires_in * 1000)
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "expires_at_ms": expires_at_ms,
-    }
+    return creds
 
 
 def read_hermes_oauth_credentials() -> Optional[Dict[str, Any]]:
