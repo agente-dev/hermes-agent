@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import inspect
 
 import pytest
 
@@ -55,6 +56,18 @@ def web_client(monkeypatch, _isolate_hermes_home):
         )
     except Exception:
         pass
+
+    # Starlette 0.36 still passes app= to httpx.Client, while httpx 0.28
+    # removed that kwarg. Keep this focused HTTP suite runnable in either
+    # dependency window without changing production code.
+    import httpx
+
+    original_client_init = httpx.Client.__init__
+    if "app" not in inspect.signature(original_client_init).parameters:
+        def _client_init_compat(self, *args, app=None, **kwargs):
+            return original_client_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.Client, "__init__", _client_init_compat)
 
     client = TestClient(app)
     client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
@@ -120,6 +133,10 @@ class TestCreateSkillEndpoint:
 
         rec = get_record("foreground-skill")
         assert rec.get("created_by") != "agent"
+
+        listed = web_client.get("/api/skills").json()
+        row = next(s for s in listed if s["name"] == "foreground-skill")
+        assert row["agent_created"] is False
 
     def test_create_rejects_missing_frontmatter(self, web_client):
         resp = web_client.post(
@@ -190,11 +207,15 @@ class TestPromoteSkillEndpoint:
         assert data["skill_name"] == "Monday Inbox Sort"
         skill_md = Path(data["skill_md"])
         assert skill_md.exists()
+        assert skill_md.parent.parent.name == "agent-created"
         body = skill_md.read_text(encoding="utf-8")
         # Frontmatter rendered + slug used as `name:`
         assert "name: monday-inbox-sort" in body
-        # Only user-turn clips folded in; no assistant content.
-        assert "every monday morning" in body
+        # Workflow semantics are distilled without copying raw transcript text.
+        assert "Organize inbox or message items by sender" in body
+        assert "Identify finance-related documents" in body
+        assert "every monday morning" not in body
+        assert "mark vendor invoices" not in body
         assert "sorting now" not in body
 
         # Background-review origin used → curator-managed agent tag set.
@@ -210,8 +231,70 @@ class TestPromoteSkillEndpoint:
             json={"skill_slug": "from-promote"},
         )
         resp = web_client.get("/api/skills")
-        names = [s["name"] for s in resp.json()]
-        assert "from-promote" in names
+        row = next(s for s in resp.json() if s["name"] == "from-promote")
+        assert row["agent_created"] is True
+        assert row["category"] == "agent-created"
+
+    def test_promoted_skill_registers_slash_command(self, web_client):
+        sid = _seed_session([("user", "save this routine")])
+        resp = web_client.post(
+            f"/api/sessions/{sid}/promote-skill",
+            json={"skill_slug": "slash-promoted"},
+        )
+        assert resp.status_code == 200, resp.text
+
+        from agent.skill_commands import scan_skill_commands
+
+        commands = scan_skill_commands()
+        assert "/slash-promoted" in commands
+        assert commands["/slash-promoted"]["name"] == "slash-promoted"
+
+    def test_promote_context_messages_null_uses_whole_session(self, web_client, monkeypatch):
+        sid = _seed_session([
+            ("user", "first confidential turn"),
+            ("assistant", "assistant turn"),
+            ("user", "second confidential turn"),
+        ])
+        captured = {}
+
+        def fake_distill(*, slug, display_name, description, messages):
+            captured["messages"] = list(messages)
+            return _skill_md(slug, description)
+
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "_distill_transcript_to_skill_md", fake_distill)
+        resp = web_client.post(
+            f"/api/sessions/{sid}/promote-skill",
+            json={"skill_slug": "whole-session"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(captured["messages"]) == 3
+
+    def test_promote_context_messages_uses_tail(self, web_client, monkeypatch):
+        sid = _seed_session([
+            ("user", "first turn"),
+            ("assistant", "assistant turn"),
+            ("user", "tail turn"),
+        ])
+        captured = {}
+
+        def fake_distill(*, slug, display_name, description, messages):
+            captured["messages"] = list(messages)
+            return _skill_md(slug, description)
+
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "_distill_transcript_to_skill_md", fake_distill)
+        resp = web_client.post(
+            f"/api/sessions/{sid}/promote-skill",
+            json={"skill_slug": "tail-session", "context_messages": 2},
+        )
+        assert resp.status_code == 200, resp.text
+        assert [m["content"] for m in captured["messages"]] == [
+            "assistant turn",
+            "tail turn",
+        ]
 
     def test_promote_unknown_session_returns_404(self, web_client):
         resp = web_client.post(
@@ -229,6 +312,15 @@ class TestPromoteSkillEndpoint:
         assert resp.status_code == 400
         assert "skill_slug" in resp.json()["detail"]
 
+    def test_promote_rejects_nonpositive_context_messages(self, web_client):
+        sid = _seed_session([("user", "hi")])
+        resp = web_client.post(
+            f"/api/sessions/{sid}/promote-skill",
+            json={"skill_slug": "bad-context", "context_messages": 0},
+        )
+        assert resp.status_code == 400
+        assert "context_messages" in resp.json()["detail"]
+
     def test_promote_does_not_leak_session_content_on_error(self, web_client):
         """Sensitive evidence policy: error responses must not include
         transcript content. Trigger a duplicate-name failure on the
@@ -240,6 +332,8 @@ class TestPromoteSkillEndpoint:
             json={"skill_slug": "dup-promoted"},
         )
         assert first.status_code == 200
+        promoted_body = Path(first.json()["skill_md"]).read_text(encoding="utf-8")
+        assert "confidential-customer-payload-xyz" not in promoted_body
         second = web_client.post(
             f"/api/sessions/{sid}/promote-skill",
             json={"skill_slug": "dup-promoted"},

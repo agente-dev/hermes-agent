@@ -2792,11 +2792,16 @@ class SkillToggle(BaseModel):
 async def get_skills():
     from tools.skills_tool import _find_all_skills
     from hermes_cli.skills_config import get_disabled_skills
+    from tools.skill_usage import get_record
     config = load_config()
     disabled = get_disabled_skills(config)
     skills = _find_all_skills(skip_disabled=True)
     for s in skills:
         s["enabled"] = s["name"] not in disabled
+        rec = get_record(str(s.get("name") or ""))
+        s["agent_created"] = (
+            rec.get("created_by") == "agent" or rec.get("agent_created") is True
+        )
     return skills
 
 
@@ -2822,12 +2827,12 @@ async def toggle_skill(body: SkillToggle):
 # (POST /api/sessions/{id}/promote-skill). Mirrors the cron HTTP surface
 # shape: no new abstraction, just an additional caller path into existing
 # primitives. See ``tools/skill_manager_tool.py`` and
-# ``agent/background_review.py``.
+# ``run_agent.AIAgent._SKILL_REVIEW_PROMPT``.
 # ---------------------------------------------------------------------------
 
 _PROMOTE_SKILL_MAX_TRANSCRIPT_CHARS = 6000
 _PROMOTE_SKILL_MAX_CONTEXT_MESSAGES = 200
-_PROMOTE_SKILL_DEFAULT_CONTEXT_MESSAGES = 40
+_PROMOTE_SKILL_CATEGORY = "agent-created"
 
 
 class SkillCreateBody(BaseModel):
@@ -2845,10 +2850,9 @@ class SkillCreateBody(BaseModel):
 class PromoteSkillBody(BaseModel):
     """Request body for ``POST /api/sessions/{id}/promote-skill``.
 
-    Operator-supplied identity for the new skill plus an optional cap on
-    how many of the trailing session messages get folded into the draft.
-    ``context_messages`` null/0 means use the default window; values are
-    capped at ``_PROMOTE_SKILL_MAX_CONTEXT_MESSAGES``.
+    Operator-supplied identity for the new skill plus an optional count of
+    trailing session messages to review. ``context_messages`` null means
+    review the whole session; positive values use the last N messages.
     """
     skill_slug: str
     skill_name: Optional[str] = None
@@ -2870,6 +2874,62 @@ def _skill_create_response(payload: Dict[str, Any], slug: str) -> Dict[str, Any]
     return response
 
 
+def _message_text(message: Dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        return "\n".join(part for part in text_parts if part)
+    return ""
+
+
+def _append_unique(items: List[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
+
+
+def _derive_workflow_steps(messages: List[Dict[str, Any]]) -> List[str]:
+    """Derive non-verbatim workflow bullets from operator turns.
+
+    This is the HTTP-safe equivalent of the skill-review prompt's
+    class-level skill guidance: identify reusable procedure semantics,
+    not session-specific transcript text. It intentionally uses coarse
+    categories and sanitized keywords so persisted SKILL.md files do not
+    copy private chat content.
+    """
+    user_texts = [
+        _message_text(msg).strip()
+        for msg in messages
+        if isinstance(msg, dict) and msg.get("role") == "user"
+    ]
+    user_texts = [text for text in user_texts if text]
+    combined = " ".join(user_texts).lower()
+    steps: List[str] = []
+
+    if any(term in combined for term in ("inbox", "email", "emails", "message", "messages")):
+        _append_unique(steps, "Organize inbox or message items by sender, source, or topic.")
+    if any(term in combined for term in ("invoice", "invoices", "receipt", "receipts", "tax", "vendor")):
+        _append_unique(steps, "Identify finance-related documents and prepare them for tax review.")
+    if any(term in combined for term in ("newsletter", "newsletters", "archive", "archived")):
+        _append_unique(steps, "Archive low-priority recurring updates after confirming they are safe to move.")
+    if any(term in combined for term in ("schedule", "weekly", "daily", "morning", "monday", "tuesday", "wednesday", "thursday", "friday")):
+        _append_unique(steps, "Apply the operator-requested cadence before scheduling or repeating the workflow.")
+    if any(term in combined for term in ("document", "documents", "file", "files", "report", "reports")):
+        _append_unique(steps, "Gather the relevant documents, files, or reports before producing the result.")
+
+    if steps:
+        return steps
+
+    return [
+        "Reconstruct the reusable workflow from the current operator context without storing raw transcript text."
+    ]
+
+
 def _distill_transcript_to_skill_md(
     *,
     slug: str,
@@ -2877,49 +2937,32 @@ def _distill_transcript_to_skill_md(
     description: str,
     messages: List[Dict[str, Any]],
 ) -> str:
-    """Produce a minimal but valid SKILL.md scaffold from a transcript.
+    """Produce a valid SKILL.md from transcript semantics.
 
-    The synchronous promote endpoint does NOT spawn a forked AIAgent
-    (that path costs an LLM round trip and an extra credential/runtime
-    inheritance dance — see ``agent.background_review._run_review_in_thread``).
-    Instead it builds an honest scaffold: operator-supplied identity
-    plus a compact ``Triggering operator intent`` block listing the user
-    turns that prompted the promotion. The background curator + future
-    ``skill_view`` patches refine the body. The result satisfies
-    ``_validate_frontmatter`` and is well-formed enough that the slash
-    command ``/<slug>`` registers on first reload.
+    The HTTP endpoint keeps the existing skill-review contract's
+    class-level umbrella shape while staying synchronous and deterministic:
+    it derives reusable workflow bullets from operator turns, uses the
+    operator-supplied slug/name as hints, and writes through
+    ``skill_manage(action="create")`` under the background-review origin.
 
     Sensitive evidence policy: per the intake, the promotion endpoint
-    must NOT serialise raw transcript content into the SKILL.md. We
-    keep only short clips of the trailing user-message turns (the
-    operator's own words), never assistant tool outputs or customer
-    payloads.
+    must NOT serialise raw transcript content into the SKILL.md. The
+    persisted skill records only non-verbatim workflow semantics and
+    aggregate counts.
     """
-    user_turns: List[str] = []
+    user_turn_count = 0
     for msg in messages:
         if not isinstance(msg, dict):
             continue
         if msg.get("role") != "user":
             continue
-        content = msg.get("content")
-        if isinstance(content, list):
-            text_parts = [
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
-            ]
-            content = "\n".join(p for p in text_parts if p)
-        if not isinstance(content, str):
-            continue
-        content = content.strip()
-        if not content:
-            continue
-        user_turns.append(content[:240])
+        user_turn_count += 1
 
-    references_block = ""
-    if user_turns:
-        bullets = "\n".join(f"- {turn}" for turn in user_turns[-10:])
-        references_block = f"\n\n## Triggering operator intent\n\n{bullets}\n"
+    reviewed_count = len(messages)
+    workflow_steps = _derive_workflow_steps(messages)
+    workflow_block = "\n".join(
+        f"{index}. {step}" for index, step in enumerate(workflow_steps, start=1)
+    )
 
     body = (
         f"# {display_name}\n\n"
@@ -2927,11 +2970,16 @@ def _distill_transcript_to_skill_md(
         "## When to invoke\n\n"
         f"Run this skill when the operator asks for the workflow named "
         f"'{display_name}' or invokes the slash command `/{slug}`.\n"
-        "\n## Steps\n\n"
+        "\n## Distilled Workflow\n\n"
+        f"{workflow_block}\n"
+        "\n## Operating Guardrails\n\n"
         "1. Confirm the operator's current goal matches the workflow above.\n"
-        "2. Follow the procedure the operator demonstrated in the promoting session.\n"
+        "2. Ask for any missing inputs needed to run the workflow safely.\n"
         "3. Surface intermediate results so the operator can intervene before any external side effect.\n"
-        f"{references_block}"
+        "4. When the workflow mutates external systems, use the normal Hermes approval gates.\n"
+        "\n## Promotion context\n\n"
+        f"- Reviewed {reviewed_count} session messages, including {user_turn_count} operator turns.\n"
+        "- Raw transcript content is intentionally omitted from this skill.\n"
     )
     frontmatter = (
         "---\n"
@@ -3006,9 +3054,14 @@ async def promote_session_to_skill(session_id: str, body: PromoteSkillBody):
     )
 
     context_n = body.context_messages
-    if context_n is None or context_n <= 0:
-        context_n = _PROMOTE_SKILL_DEFAULT_CONTEXT_MESSAGES
-    context_n = min(int(context_n), _PROMOTE_SKILL_MAX_CONTEXT_MESSAGES)
+    if context_n is not None:
+        context_n = int(context_n)
+        if context_n <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="context_messages must be a positive integer when provided.",
+            )
+        context_n = min(context_n, _PROMOTE_SKILL_MAX_CONTEXT_MESSAGES)
 
     from hermes_state import SessionDB
 
@@ -3028,7 +3081,11 @@ async def promote_session_to_skill(session_id: str, body: PromoteSkillBody):
     finally:
         db.close()
 
-    tail_messages = all_messages[-context_n:] if all_messages else []
+    tail_messages = (
+        all_messages
+        if context_n is None
+        else all_messages[-context_n:]
+    )
 
     skill_md = _distill_transcript_to_skill_md(
         slug=slug,
@@ -3053,7 +3110,12 @@ async def promote_session_to_skill(session_id: str, body: PromoteSkillBody):
     token = set_current_write_origin(BACKGROUND_REVIEW)
     try:
         try:
-            raw = skill_manage(action="create", name=slug, content=skill_md)
+            raw = skill_manage(
+                action="create",
+                name=slug,
+                content=skill_md,
+                category=_PROMOTE_SKILL_CATEGORY,
+            )
         except Exception:
             _log.exception(
                 "POST /api/sessions/%s/promote-skill: skill_manage raised",
