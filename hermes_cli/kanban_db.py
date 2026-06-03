@@ -83,6 +83,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+try:
+    from agent.pii_guard import PIIWriteBlocked, guard_write as _pii_guard_write
+except ImportError:  # pragma: no cover - defensive for partial plugin loads
+    class PIIWriteBlocked(RuntimeError):
+        pass
+
+    def _pii_guard_write(content: str, *, allow_pii: bool = False) -> None:
+        return None
+
 from toolsets import get_toolset_names
 
 
@@ -99,6 +108,10 @@ KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 # ``heartbeat_claim(task_id)`` periodically.  In practice most kanban
 # workloads either finish within 15m or set a longer claim explicitly.
 DEFAULT_CLAIM_TTL_SECONDS = 15 * 60
+PII_WRITE_BLOCKED_ERROR_HE = (
+    "השמירה נחסמה כי נראה שהתוכן כולל פרטי שכר, מס או מספר זהות. "
+    "אפשר לשמור תוכן כזה רק אחרי אישור מפורש של המפעיל."
+)
 
 
 # Worker-context caps so build_worker_context() stays bounded on
@@ -125,6 +138,20 @@ DEFAULT_BOARD = "default"
 # pass without fuss. Board names with display formatting (spaces, emoji)
 # live in ``board.json``; the slug is just the directory name.
 _BOARD_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-_]{0,63}$")
+
+
+def guard_kanban_persistent_text(
+    content: Optional[str],
+    *,
+    allow_pii: bool = False,
+) -> None:
+    """Block payroll/tax PII before a kanban body/comment is persisted."""
+    if content is None:
+        return
+    text = str(content)
+    if not text.strip():
+        return
+    _pii_guard_write(text, allow_pii=allow_pii)
 
 
 def _normalize_board_slug(slug: Optional[str]) -> Optional[str]:
@@ -1244,6 +1271,7 @@ def create_task(
     max_runtime_seconds: Optional[int] = None,
     skills: Optional[Iterable[str]] = None,
     max_retries: Optional[int] = None,
+    allow_pii: bool = False,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -1278,6 +1306,7 @@ def create_task(
             f"got {workspace_kind!r}"
         )
     parents = tuple(p for p in parents if p)
+    guard_kanban_persistent_text(body, allow_pii=allow_pii)
 
     # Normalise + validate skills: strip whitespace, drop empties, dedupe
     # (preserving order). Refuse commas inside a single name so we don't
@@ -1620,12 +1649,18 @@ def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Op
 # ---------------------------------------------------------------------------
 
 def add_comment(
-    conn: sqlite3.Connection, task_id: str, author: str, body: str
+    conn: sqlite3.Connection,
+    task_id: str,
+    author: str,
+    body: str,
+    *,
+    allow_pii: bool = False,
 ) -> int:
     if not body or not body.strip():
         raise ValueError("comment body is required")
     if not author or not author.strip():
         raise ValueError("comment author is required")
+    guard_kanban_persistent_text(body, allow_pii=allow_pii)
     now = int(time.time())
     with write_txn(conn):
         if not conn.execute(
@@ -2357,6 +2392,7 @@ def complete_task(
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
+    allow_pii: bool = False,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
@@ -2386,6 +2422,13 @@ def complete_task(
     ``suspected_hallucinated_references`` event. This pass is advisory
     and never blocks.
     """
+    guard_kanban_persistent_text(result, allow_pii=allow_pii)
+    guard_kanban_persistent_text(summary, allow_pii=allow_pii)
+    if metadata:
+        guard_kanban_persistent_text(
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            allow_pii=allow_pii,
+        )
     now = int(time.time())
 
     # Gate: verify created_cards BEFORE the main write txn. A rejected
@@ -2521,9 +2564,17 @@ def edit_completed_task_result(
     result: str,
     summary: Optional[str] = None,
     metadata: Optional[dict] = None,
+    allow_pii: bool = False,
 ) -> bool:
     """Backfill the user-visible result for an already completed task."""
     handoff_summary = summary if summary is not None else result
+    guard_kanban_persistent_text(result, allow_pii=allow_pii)
+    guard_kanban_persistent_text(handoff_summary, allow_pii=allow_pii)
+    if metadata:
+        guard_kanban_persistent_text(
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            allow_pii=allow_pii,
+        )
     with write_txn(conn):
         row = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (task_id,),
@@ -2587,8 +2638,10 @@ def block_task(
     *,
     reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    allow_pii: bool = False,
 ) -> bool:
     """Transition ``running -> blocked``."""
+    guard_kanban_persistent_text(reason, allow_pii=allow_pii)
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -2698,6 +2751,7 @@ def specify_triage_task(
     title: Optional[str] = None,
     body: Optional[str] = None,
     author: Optional[str] = None,
+    allow_pii: bool = False,
 ) -> bool:
     """Flesh out a triage task and promote it to ``todo``.
 
@@ -2732,6 +2786,7 @@ def specify_triage_task(
             params.append(title.strip())
             changed_fields.append("title")
         if body is not None and (body or "") != (existing["body"] or ""):
+            guard_kanban_persistent_text(body, allow_pii=allow_pii)
             sets.append("body = ?")
             params.append(body)
             changed_fields.append("body")

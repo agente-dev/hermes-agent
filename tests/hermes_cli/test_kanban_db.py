@@ -12,6 +12,15 @@ import pytest
 from hermes_cli import kanban_db as kb
 
 
+_PAYSLIP_BODY = (
+    "תלוש שכר עבור עובד בדיקה\n"
+    "ת.ז. 000000000\n"
+    "מעסיק: חברת דוגמה בע\"מ\n"
+    "ברוטו 12,500\n"
+    "נטו 9,800\n"
+)
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     """Isolated HERMES_HOME with an empty kanban DB."""
@@ -78,6 +87,28 @@ def test_create_task_unknown_parent_errors(kanban_home):
 def test_workspace_kind_validation(kanban_home):
     with kb.connect() as conn, pytest.raises(ValueError, match="workspace_kind"):
         kb.create_task(conn, title="bad ws", workspace_kind="cloud")
+
+
+def test_create_task_blocks_payroll_pii_body(kanban_home):
+    with kb.connect() as conn, pytest.raises(kb.PIIWriteBlocked):
+        kb.create_task(conn, title="client document note", body=_PAYSLIP_BODY)
+
+    with kb.connect() as conn:
+        assert kb.list_tasks(conn) == []
+
+
+def test_create_task_allows_pii_body_after_explicit_confirmation(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="confirmed payroll note",
+            body=_PAYSLIP_BODY,
+            allow_pii=True,
+        )
+        task = kb.get_task(conn, tid)
+
+    assert task is not None
+    assert task.body == _PAYSLIP_BODY
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +399,35 @@ def test_complete_records_result(kanban_home):
     assert task.completed_at is not None
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"result": _PAYSLIP_BODY},
+        {"summary": _PAYSLIP_BODY},
+        {"metadata": {"evidence": _PAYSLIP_BODY}},
+    ],
+)
+def test_complete_blocks_payroll_pii_handoff_fields(kanban_home, kwargs):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x")
+        with pytest.raises(kb.PIIWriteBlocked):
+            kb.complete_task(conn, t, **kwargs)
+        task = kb.get_task(conn, t)
+
+    assert task.status == "ready"
+    assert task.result is None
+
+
+def test_complete_allows_pii_handoff_after_explicit_confirmation(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x")
+        assert kb.complete_task(conn, t, summary=_PAYSLIP_BODY, allow_pii=True)
+        run = kb.latest_run(conn, t)
+
+    assert run is not None
+    assert run.summary == _PAYSLIP_BODY
+
+
 def test_block_then_unblock(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
@@ -376,6 +436,17 @@ def test_block_then_unblock(kanban_home):
         assert kb.get_task(conn, t).status == "blocked"
         assert kb.unblock_task(conn, t)
         assert kb.get_task(conn, t).status == "ready"
+
+
+def test_block_blocks_payroll_pii_reason(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x", assignee="a")
+        kb.claim_task(conn, t)
+        with pytest.raises(kb.PIIWriteBlocked):
+            kb.block_task(conn, t, reason=_PAYSLIP_BODY)
+        task = kb.get_task(conn, t)
+
+    assert task.status == "running"
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +624,24 @@ def test_empty_comment_rejected(kanban_home):
         t = kb.create_task(conn, title="x")
         with pytest.raises(ValueError, match="body is required"):
             kb.add_comment(conn, t, "user", "")
+
+
+def test_add_comment_blocks_payroll_pii_body(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x")
+        with pytest.raises(kb.PIIWriteBlocked):
+            kb.add_comment(conn, t, "user", _PAYSLIP_BODY)
+        assert kb.list_comments(conn, t) == []
+
+
+def test_add_comment_allows_pii_after_explicit_confirmation(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x")
+        kb.add_comment(conn, t, "user", _PAYSLIP_BODY, allow_pii=True)
+        comments = kb.list_comments(conn, t)
+
+    assert len(comments) == 1
+    assert comments[0].body == _PAYSLIP_BODY.strip()
 
 
 def test_events_capture_lifecycle(kanban_home):

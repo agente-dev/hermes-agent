@@ -20,6 +20,15 @@ from fastapi.testclient import TestClient
 from hermes_cli import kanban_db as kb
 
 
+_PAYSLIP_BODY = (
+    "תלוש שכר עבור עובד בדיקה\n"
+    "ת.ז. 000000000\n"
+    "מעסיק: חברת דוגמה בע\"מ\n"
+    "ברוטו 12,500\n"
+    "נטו 9,800\n"
+)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -221,6 +230,54 @@ def test_patch_status_complete(client):
     assert any(x["id"] == t["id"] for x in done["tasks"])
 
 
+def test_patch_status_done_blocks_payroll_pii_handoff(client):
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+
+    r = client.patch(
+        f"/api/plugins/kanban/tasks/{t['id']}",
+        json={"status": "done", "summary": _PAYSLIP_BODY},
+    )
+
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "pii_write_blocked"
+    assert detail["error_he"]
+    assert client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()["task"]["status"] == "ready"
+
+
+def test_patch_status_done_allows_pii_after_confirmation(client):
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+
+    r = client.patch(
+        f"/api/plugins/kanban/tasks/{t['id']}",
+        json={
+            "status": "done",
+            "summary": _PAYSLIP_BODY,
+            "confirm_pii_write": True,
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    detail = client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()
+    assert detail["task"]["status"] == "done"
+    assert detail["task"]["latest_summary"] == _PAYSLIP_BODY
+
+
+def test_patch_status_blocked_blocks_payroll_pii_reason(client):
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+
+    r = client.patch(
+        f"/api/plugins/kanban/tasks/{t['id']}",
+        json={"status": "blocked", "block_reason": _PAYSLIP_BODY},
+    )
+
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "pii_write_blocked"
+    assert detail["error_he"]
+    assert client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()["task"]["status"] == "ready"
+
+
 def test_patch_block_then_unblock(client):
     t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
     r = client.patch(
@@ -331,6 +388,58 @@ def test_patch_status_running_rejected(client):
     assert statuses.get(t["id"]) != "running"
 
 
+def test_create_task_blocks_payroll_pii_body(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "client document note", "body": _PAYSLIP_BODY},
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "pii_write_blocked"
+    assert detail["error_he"]
+
+    board = client.get("/api/plugins/kanban/board").json()
+    assert all(len(col["tasks"]) == 0 for col in board["columns"])
+
+
+def test_create_task_allows_pii_body_after_confirmation(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "confirmed payroll note",
+            "body": _PAYSLIP_BODY,
+            "confirm_pii_write": True,
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["task"]["body"] == _PAYSLIP_BODY
+
+
+def test_patch_task_body_blocks_payroll_pii(client):
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    r = client.patch(
+        f"/api/plugins/kanban/tasks/{t['id']}",
+        json={"body": _PAYSLIP_BODY},
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "pii_write_blocked"
+    assert detail["error_he"]
+
+    refreshed = client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()["task"]
+    assert refreshed["body"] is None
+
+
+def test_patch_task_body_allows_pii_after_confirmation(client):
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    r = client.patch(
+        f"/api/plugins/kanban/tasks/{t['id']}",
+        json={"body": _PAYSLIP_BODY, "confirm_pii_write": True},
+    )
+    assert r.status_code == 200
+    assert r.json()["task"]["body"] == _PAYSLIP_BODY
+
+
 # ---------------------------------------------------------------------------
 # Comments + Links
 # ---------------------------------------------------------------------------
@@ -358,6 +467,34 @@ def test_add_comment_empty_rejected(client):
         json={"body": "   "},
     )
     assert r.status_code == 400
+
+
+def test_add_comment_blocks_payroll_pii_body(client):
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{t['id']}/comments",
+        json={"body": _PAYSLIP_BODY},
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "pii_write_blocked"
+    assert detail["error_he"]
+
+    comments = client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()["comments"]
+    assert comments == []
+
+
+def test_add_comment_allows_pii_after_confirmation(client):
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{t['id']}/comments",
+        json={"body": _PAYSLIP_BODY, "confirm_pii_write": True},
+    )
+    assert r.status_code == 200
+
+    comments = client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()["comments"]
+    assert len(comments) == 1
+    assert comments[0]["body"] == _PAYSLIP_BODY.strip()
 
 
 def test_add_link_and_delete_link(client):
@@ -708,6 +845,42 @@ def test_bulk_status_done_forwards_completion_summary(client):
             assert run.metadata == {"source": "dashboard"}
     finally:
         conn.close()
+
+
+def test_bulk_status_done_blocks_payroll_pii_handoff(client):
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "a"}).json()["task"]
+
+    r = client.post(
+        "/api/plugins/kanban/tasks/bulk",
+        json={"ids": [t["id"]], "status": "done", "summary": _PAYSLIP_BODY},
+    )
+
+    assert r.status_code == 200
+    result = r.json()["results"][0]
+    assert result["ok"] is False
+    assert result["code"] == "pii_write_blocked"
+    assert result["error_he"]
+    assert client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()["task"]["status"] == "ready"
+
+
+def test_bulk_status_done_allows_pii_after_confirmation(client):
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "a"}).json()["task"]
+
+    r = client.post(
+        "/api/plugins/kanban/tasks/bulk",
+        json={
+            "ids": [t["id"]],
+            "status": "done",
+            "summary": _PAYSLIP_BODY,
+            "confirm_pii_write": True,
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["results"][0]["ok"] is True
+    detail = client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()
+    assert detail["task"]["status"] == "done"
+    assert detail["task"]["latest_summary"] == _PAYSLIP_BODY
 
 
 def test_dashboard_done_actions_prompt_for_completion_summary():

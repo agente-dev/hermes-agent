@@ -1,4 +1,4 @@
-"""PII guard for persistent memory writes.
+"""PII guard for persistent writes.
 
 Background (hermes-agent-202606-22, "memory-phantom-clients" — 2026-06-02):
 An agent OCR'd third-party payslips that belonged to a client's documents
@@ -84,7 +84,7 @@ class PIIWriteBlocked(RuntimeError):
 
     def __init__(self, verdict: PIIVerdict) -> None:
         super().__init__(
-            "memory write blocked: payload looks like third-party PII "
+            "persistent write blocked: payload looks like third-party PII "
             f"({verdict.reason}). Pass allow_pii=True only after explicit "
             "operator confirmation."
         )

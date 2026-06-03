@@ -30,6 +30,7 @@ import logging
 import os
 from typing import Any, Optional
 
+from agent.pii_guard import PIIWriteBlocked
 from tools.registry import registry, tool_error
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,10 @@ logger = logging.getLogger(__name__)
 
 KANBAN_LIST_DEFAULT_LIMIT = 50
 KANBAN_LIST_MAX_LIMIT = 200
+_PII_WRITE_BLOCKED_ERROR_HE = (
+    "השמירה נחסמה כי נראה שהתוכן כולל פרטי שכר, מס או מספר זהות. "
+    "אפשר לשמור תוכן כזה רק אחרי אישור מפורש של המפעיל."
+)
 
 
 def _profile_has_kanban_toolset() -> bool:
@@ -153,6 +158,14 @@ def _connect():
 
 def _ok(**fields: Any) -> str:
     return json.dumps({"ok": True, **fields})
+
+
+def _pii_tool_error(exc: PIIWriteBlocked) -> str:
+    return tool_error(
+        str(exc),
+        code="pii_write_blocked",
+        error_he=_PII_WRITE_BLOCKED_ERROR_HE,
+    )
 
 
 def _normalize_profile(value: Any) -> Optional[str]:
@@ -371,6 +384,9 @@ def _handle_complete(args: dict, **kw) -> str:
     metadata = args.get("metadata")
     result = args.get("result")
     created_cards = args.get("created_cards")
+    confirm_pii_write, bool_error = _parse_bool_arg(args, "confirm_pii_write")
+    if bool_error:
+        return tool_error(bool_error)
     if created_cards is not None:
         if isinstance(created_cards, str):
             # Accept a single id as a string for convenience.
@@ -401,6 +417,7 @@ def _handle_complete(args: dict, **kw) -> str:
                     result=result, summary=summary, metadata=metadata,
                     created_cards=created_cards,
                     expected_run_id=_worker_run_id(tid),
+                    allow_pii=confirm_pii_write,
                 )
             except kb.HallucinatedCardsError as hall_err:
                 # Structured rejection — surface the phantom ids so the
@@ -430,6 +447,8 @@ def _handle_complete(args: dict, **kw) -> str:
             return _ok(task_id=tid, run_id=run.id if run else None)
         finally:
             conn.close()
+    except PIIWriteBlocked as e:
+        return _pii_tool_error(e)
     except Exception as e:
         logger.exception("kanban_complete failed")
         return tool_error(f"kanban_complete: {e}")
@@ -448,6 +467,9 @@ def _handle_block(args: dict, **kw) -> str:
     reason = args.get("reason")
     if not reason or not str(reason).strip():
         return tool_error("reason is required — explain what input you need")
+    confirm_pii_write, bool_error = _parse_bool_arg(args, "confirm_pii_write")
+    if bool_error:
+        return tool_error(bool_error)
     try:
         kb, conn = _connect()
         try:
@@ -455,6 +477,7 @@ def _handle_block(args: dict, **kw) -> str:
                 conn, tid,
                 reason=reason,
                 expected_run_id=_worker_run_id(tid),
+                allow_pii=confirm_pii_write,
             )
             if not ok:
                 return tool_error(
@@ -465,6 +488,8 @@ def _handle_block(args: dict, **kw) -> str:
             return _ok(task_id=tid, run_id=run.id if run else None)
         finally:
             conn.close()
+    except PIIWriteBlocked as e:
+        return _pii_tool_error(e)
     except Exception as e:
         logger.exception("kanban_block failed")
         return tool_error(f"kanban_block: {e}")
@@ -529,6 +554,9 @@ def _handle_comment(args: dict, **kw) -> str:
     body = args.get("body")
     if not body or not str(body).strip():
         return tool_error("body is required")
+    confirm_pii_write, bool_error = _parse_bool_arg(args, "confirm_pii_write")
+    if bool_error:
+        return tool_error(bool_error)
     # Author is intentionally derived from the worker's own runtime
     # identity, NOT from caller-supplied args. Comments are injected
     # into the next worker's system prompt by ``build_worker_context``
@@ -542,10 +570,18 @@ def _handle_comment(args: dict, **kw) -> str:
     try:
         kb, conn = _connect()
         try:
-            cid = kb.add_comment(conn, tid, author=author, body=str(body))
+            cid = kb.add_comment(
+                conn,
+                tid,
+                author=author,
+                body=str(body),
+                allow_pii=confirm_pii_write,
+            )
             return _ok(task_id=tid, comment_id=cid)
         finally:
             conn.close()
+    except PIIWriteBlocked as e:
+        return _pii_tool_error(e)
     except Exception as e:
         logger.exception("kanban_comment failed")
         return tool_error(f"kanban_comment: {e}")
@@ -567,6 +603,9 @@ def _handle_create(args: dict, **kw) -> str:
             "task (the dispatcher will only spawn tasks with an assignee)"
         )
     body = args.get("body")
+    confirm_pii_write, bool_error = _parse_bool_arg(args, "confirm_pii_write")
+    if bool_error:
+        return tool_error(bool_error)
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
     priority = args.get("priority")
@@ -612,6 +651,7 @@ def _handle_create(args: dict, **kw) -> str:
                 ),
                 skills=skills,
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
+                allow_pii=confirm_pii_write,
             )
             new_task = kb.get_task(conn, new_tid)
             return _ok(
@@ -622,6 +662,8 @@ def _handle_create(args: dict, **kw) -> str:
             conn.close()
     except ValueError as e:
         return tool_error(f"kanban_create: {e}")
+    except PIIWriteBlocked as e:
+        return _pii_tool_error(e)
     except Exception as e:
         logger.exception("kanban_create failed")
         return tool_error(f"kanban_create: {e}")
@@ -811,6 +853,14 @@ KANBAN_COMPLETE_SCHEMA = {
                     "did not create any cards."
                 ),
             },
+            "confirm_pii_write": {
+                "type": "boolean",
+                "description": (
+                    "Set true only after explicit operator confirmation "
+                    "that this completion handoff should persist payroll, "
+                    "tax-form, or national-ID-like content."
+                ),
+            },
         },
         "required": [],
     },
@@ -838,6 +888,14 @@ KANBAN_BLOCK_SCHEMA = {
                     "What you need answered, in one or two sentences. "
                     "Don't paste the whole conversation; the human has "
                     "the board and can ask follow-ups via comments."
+                ),
+            },
+            "confirm_pii_write": {
+                "type": "boolean",
+                "description": (
+                    "Set true only after explicit operator confirmation "
+                    "that this block reason should persist payroll, tax-form, "
+                    "or national-ID-like content."
                 ),
             },
         },
@@ -894,6 +952,14 @@ KANBAN_COMMENT_SCHEMA = {
                 "type": "string",
                 "description": "Markdown-supported comment body.",
             },
+            "confirm_pii_write": {
+                "type": "boolean",
+                "description": (
+                    "Set true only after explicit operator confirmation "
+                    "that this comment should persist payroll, tax-form, "
+                    "or national-ID-like content."
+                ),
+            },
         },
         "required": ["task_id", "body"],
     },
@@ -931,6 +997,14 @@ KANBAN_CREATE_SCHEMA = {
                     "Opening post: full spec, acceptance criteria, "
                     "links. The assigned worker reads this as part of "
                     "its context."
+                ),
+            },
+            "confirm_pii_write": {
+                "type": "boolean",
+                "description": (
+                    "Set true only after explicit operator confirmation "
+                    "that this task body should persist payroll, tax-form, "
+                    "or national-ID-like content."
                 ),
             },
             "parents": {

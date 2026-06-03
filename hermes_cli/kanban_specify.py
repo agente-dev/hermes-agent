@@ -137,6 +137,7 @@ def specify_task(
     *,
     author: Optional[str] = None,
     timeout: Optional[int] = None,
+    allow_pii: bool = False,
 ) -> SpecifyOutcome:
     """Specify a single triage task and promote it to ``todo``.
 
@@ -233,13 +234,22 @@ def specify_task(
                 task_id, False, "LLM response missing title and body"
             )
 
-    with kb.connect() as conn:
-        ok = kb.specify_triage_task(
-            conn,
+    try:
+        with kb.connect() as conn:
+            ok = kb.specify_triage_task(
+                conn,
+                task_id,
+                title=new_title,
+                body=new_body,
+                author=author or _profile_author(),
+                allow_pii=allow_pii,
+            )
+    except kb.PIIWriteBlocked:
+        return SpecifyOutcome(
             task_id,
-            title=new_title,
-            body=new_body,
-            author=author or _profile_author(),
+            False,
+            "generated body looked like payroll/tax PII; "
+            "rerun with explicit confirmation to persist it",
         )
     if not ok:
         # Race: someone else promoted / archived the task between our
