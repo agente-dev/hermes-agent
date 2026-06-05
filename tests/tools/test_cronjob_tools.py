@@ -452,3 +452,54 @@ class TestUnifiedCronjobTool:
         assert updated["success"] is True
         stored = get_job(created["job_id"])
         assert stored["deliver"] == "telegram"
+
+
+class TestScheduleRoutineAlias:
+    @pytest.fixture(autouse=True)
+    def _setup_cron_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("cron.jobs.CRON_DIR", tmp_path / "cron")
+        monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
+        monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
+
+    def test_schedule_routine_creates_job(self):
+        from tools.cronjob_tools import schedule_routine
+
+        created = json.loads(
+            schedule_routine(
+                prompt="Scan WhatsApp inbox and sort docs into client folders",
+                schedule="0 9 * * *",
+                name="WA Daily Scan",
+            )
+        )
+        assert created["success"] is True
+        assert created["name"] == "WA Daily Scan"
+
+        listing = json.loads(cronjob(action="list"))
+        assert listing["count"] == 1
+        assert listing["jobs"][0]["name"] == "WA Daily Scan"
+
+    def test_create_routine_is_python_alias(self):
+        from tools.cronjob_tools import create_routine, schedule_routine
+
+        assert create_routine is schedule_routine
+
+    def test_schedule_routine_requires_schedule(self):
+        from tools.cronjob_tools import schedule_routine
+
+        out = json.loads(schedule_routine(prompt="x"))
+        assert out["success"] is False
+        assert "schedule" in out["error"].lower()
+
+    def test_schedule_routine_registered_with_hebrew_label_and_category(self):
+        import tools.cronjob_tools  # noqa: F401
+        from tools.registry import registry
+
+        entry = next(
+            (e for e in registry._snapshot_entries() if e.name == "schedule_routine"),
+            None,
+        )
+        assert entry is not None, "schedule_routine must be registered"
+        assert entry.label_he == "קביעת משימה מתוזמנת"
+        assert entry.category == "automation"
+        from tools.cronjob_tools import check_cronjob_requirements
+        assert entry.check_fn is check_cronjob_requirements

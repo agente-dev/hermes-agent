@@ -869,6 +869,97 @@ def check_cronjob_requirements() -> bool:
 # --- Registry ---
 from tools.registry import registry, tool_error
 
+
+def schedule_routine(
+    prompt: Optional[str] = None,
+    schedule: Optional[str] = None,
+    name: Optional[str] = None,
+    deliver: Optional[str] = None,
+    skills: Optional[List[str]] = None,
+    repeat: Optional[int] = None,
+    task_id: str = None,
+) -> str:
+    """Create a scheduled routine. Thin wrapper over ``cronjob(action='create')``."""
+    return cronjob(
+        action="create",
+        prompt=prompt,
+        schedule=schedule,
+        name=name,
+        deliver=deliver,
+        skills=skills,
+        repeat=repeat,
+        task_id=task_id,
+    )
+
+
+create_routine = schedule_routine
+
+
+SCHEDULE_ROUTINE_SCHEMA = {
+    "name": "schedule_routine",
+    "description": """Schedule a recurring or one-shot routine — a simplified alias for cronjob(action='create').
+
+Use this when the user asks to "set up", "schedule", "run daily/weekly/every N", or "remind me at" — anything where the intent is clearly to create a new scheduled task. For listing, updating, pausing, or removing existing routines, use the cronjob tool with the matching action.
+
+Routines run in a fresh session with no current-chat context, so prompts must be self-contained. If skills are provided, the future run loads them in order, then follows the prompt as the task instruction.
+
+The agent's final response is auto-delivered to the target — put the primary user-facing content in the final response. Routines run autonomously with no user present; they cannot ask questions or request clarification.
+
+Safety: routine runs should not recursively schedule more routines.""",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "The full self-contained prompt the routine will execute on each run. If skills are also provided, this becomes the task instruction paired with those skills."
+            },
+            "schedule": {
+                "type": "string",
+                "description": "REQUIRED. '30m', 'every 2h', '0 9 * * *', or ISO timestamp. Examples: '30m' (every 30 minutes), 'every 2h' (every 2 hours), '0 9 * * *' (daily at 9am), '2026-06-01T09:00:00' (one-shot)."
+            },
+            "name": {
+                "type": "string",
+                "description": "Optional human-friendly name for the routine."
+            },
+            "deliver": {
+                "type": "string",
+                "description": "Omit to auto-deliver back to the current chat and topic (recommended). Set explicitly only when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), 'all' (fan out to every connected home channel), or platform:chat_id:thread_id."
+            },
+            "skills": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional ordered list of skill names to load before executing the routine prompt."
+            },
+            "repeat": {
+                "type": "integer",
+                "description": "Optional repeat count. Omit for defaults (once for one-shot, forever for recurring)."
+            },
+        },
+        "required": ["schedule"]
+    }
+}
+
+
+registry.register(
+    name="schedule_routine",
+    toolset="cronjob",
+    schema=SCHEDULE_ROUTINE_SCHEMA,
+    handler=lambda args, **kw: schedule_routine(
+        prompt=args.get("prompt"),
+        schedule=args.get("schedule"),
+        name=args.get("name"),
+        deliver=args.get("deliver"),
+        skills=args.get("skills"),
+        repeat=args.get("repeat"),
+        task_id=kw.get("task_id"),
+    ),
+    check_fn=check_cronjob_requirements,
+    emoji="⏰",
+    label_he="קביעת משימה מתוזמנת",
+    category="automation",
+)
+
+
 registry.register(
     name="cronjob",
     toolset="cronjob",
