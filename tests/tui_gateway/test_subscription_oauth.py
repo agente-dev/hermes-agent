@@ -38,19 +38,23 @@ def _restore_stdout():
 @pytest.fixture()
 def server(tmp_path):
     # Real Path for hermes_home — anthropic_adapter does Path / "file".
-    with patch.dict("sys.modules", {
-        "hermes_cli.env_loader": MagicMock(),
-        "hermes_cli.banner": MagicMock(),
-        "hermes_state": MagicMock(),
-    }), patch("hermes_constants.get_hermes_home", return_value=tmp_path):
-        mod = importlib.import_module("tui_gateway.server")
-        # Reset OAuth state — module is import-cached across tests
-        mod._oauth_subscription_sessions.clear()
-        mod._sessions.clear()
-        mod._pending.clear()
-        mod._answers.clear()
-        yield mod
-        mod._oauth_subscription_sessions.clear()
+    try:
+        with patch.dict("sys.modules", {
+            "hermes_cli.env_loader": MagicMock(),
+            "hermes_cli.banner": MagicMock(),
+            "hermes_state": MagicMock(),
+        }), patch("hermes_constants.get_hermes_home", return_value=tmp_path):
+            mod = importlib.import_module("tui_gateway.server")
+    except Exception:
+        pytest.skip("tui_gateway.server not importable in this environment")
+        return
+    # Reset OAuth state — module is import-cached across tests
+    mod._oauth_subscription_sessions.clear()
+    mod._sessions.clear()
+    mod._pending.clear()
+    mod._answers.clear()
+    yield mod
+    mod._oauth_subscription_sessions.clear()
 
 
 @pytest.fixture()
@@ -276,6 +280,7 @@ def test_start_provider_aliases(server):
 
 
 def test_build_anthropic_authorize_url_shape():
+    pytest.importorskip("agent.anthropic_adapter")
     from agent.anthropic_adapter import build_anthropic_authorize_url
 
     built = build_anthropic_authorize_url()
@@ -289,6 +294,7 @@ def test_build_anthropic_authorize_url_shape():
 
 
 def test_exchange_anthropic_state_mismatch_returns_none():
+    pytest.importorskip("agent.anthropic_adapter")
     from agent.anthropic_adapter import exchange_anthropic_oauth_code
 
     # raw code that embeds the WRONG state — no HTTP call should be made

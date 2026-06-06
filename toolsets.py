@@ -38,7 +38,7 @@ _HERMES_CORE_TOOLS = [
     # Vision + image generation
     "vision_analyze", "image_generate",
     # Skills
-    "skills_list", "skill_view", "skill_manage",
+    "skills_list", "list_skills", "skill_view", "skill_manage",
     # Browser automation
     "browser_navigate", "browser_snapshot", "browser_click",
     "browser_type", "browser_scroll", "browser_back",
@@ -56,6 +56,8 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
+    # Workflow persistence & scheduling
+    "save_workflow", "create_routine",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -154,6 +156,12 @@ TOOLSETS = {
         "tools": ["terminal", "process"],
         "includes": []
     },
+
+    "workflows": {
+        "description": "Workflow persistence and routine scheduling tools",
+        "tools": ["save_workflow", "create_routine"],
+        "includes": []
+    },
     
     "moa": {
         "description": "Advanced reasoning and problem-solving tools",
@@ -163,7 +171,7 @@ TOOLSETS = {
     
     "skills": {
         "description": "Access, create, edit, and manage skill documents with specialized instructions and knowledge",
-        "tools": ["skills_list", "skill_view", "skill_manage"],
+        "tools": ["skills_list", "list_skills", "skill_view", "skill_manage"],
         "includes": []
     },
     
@@ -375,7 +383,7 @@ TOOLSETS = {
             # Vision + image generation
             "vision_analyze", "image_generate",
             # Skills
-            "skills_list", "skill_view", "skill_manage",
+            "skills_list", "list_skills", "skill_view", "skill_manage",
             # Browser automation
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
