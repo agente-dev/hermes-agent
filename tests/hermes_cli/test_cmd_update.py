@@ -269,10 +269,13 @@ class TestCmdUpdateBranchFallback:
             (ws_flags, PROJECT_ROOT),
         ]
         if len(npm_calls) > 2:
-            # The web/ install runs from the workspace root when the root
-            # lockfile exists (npm workspaces hoist node_modules upward).
+            # The web/ ci call runs from web/ itself on this fork
+            # (pre-consolidation — web/package-lock.json still exists).
+            # Upstream consolidated workspace lockfiles in a51a7b9b9
+            # (deleted web/package-lock.json), at which point
+            # _workspace_root returns PROJECT_ROOT.
             assert npm_calls[2:] == [
-                (["/usr/bin/npm", "ci", "--silent"], PROJECT_ROOT),
+                (["/usr/bin/npm", "ci", "--silent"], PROJECT_ROOT / "web"),
             ]
 
         # The web UI build itself went through the streaming helper.
