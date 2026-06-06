@@ -3127,6 +3127,7 @@ class APIServerAdapter(BasePlatformAdapter):
             deliver = body.get("deliver", "local")
             skills = body.get("skills")
             repeat = body.get("repeat")
+            workflow_ids = body.get("workflow_ids")
 
             if not name:
                 return web.json_response({"error": "Name is required"}, status=400)
@@ -3154,6 +3155,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 kwargs["skills"] = skills
             if repeat is not None:
                 kwargs["repeat"] = repeat
+            if workflow_ids:
+                kwargs["workflow_ids"] = workflow_ids
 
             job = _cron_create(**kwargs)
             return web.json_response({"job": job})
