@@ -585,6 +585,13 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"could not complete {tid} (unknown id or already terminal)"
                 )
             run = kb.latest_run(conn, tid)
+            # Nudge on complete — a completion can promote children via the
+            # on_complete graph (orchestrator or manual links).
+            try:
+                from hermes.dispatcher.nudge import nudge
+                nudge(board=board)
+            except Exception:
+                pass
             return _ok(task_id=tid, run_id=run.id if run else None)
         finally:
             conn.close()
@@ -818,6 +825,15 @@ def _handle_create(args: dict, **kw) -> str:
                 session_id=session_id,
             )
             new_task = kb.get_task(conn, new_tid)
+            # Fire generic nudge so the dispatcher (gateway or daemon) wakes
+            # immediately instead of waiting the next tick. This is the
+            # happy-path contract for orchestrator fan-out and any other
+            # creator of ready work.
+            try:
+                from hermes.dispatcher.nudge import nudge
+                nudge(board=board)
+            except Exception:
+                pass
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
@@ -849,6 +865,12 @@ def _handle_unblock(args: dict, **kw) -> str:
             ok = kb.unblock_task(conn, str(tid))
             if not ok:
                 return tool_error(f"could not unblock {tid} (not blocked or unknown)")
+            # Unblock promotes to ready; nudge the dispatcher for immediate pickup.
+            try:
+                from hermes.dispatcher.nudge import nudge
+                nudge(board=board)
+            except Exception:
+                pass
             return _ok(task_id=str(tid), status="ready")
         finally:
             conn.close()
@@ -870,6 +892,12 @@ def _handle_link(args: dict, **kw) -> str:
         kb, conn = _connect(board=board)
         try:
             kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
+            # Nudge on link too (a link can unblock ready promotion for dependents).
+            try:
+                from hermes.dispatcher.nudge import nudge
+                nudge(board=board)
+            except Exception:
+                pass
             return _ok(parent_id=parent_id, child_id=child_id)
         finally:
             conn.close()
