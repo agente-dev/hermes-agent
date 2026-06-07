@@ -12957,6 +12957,12 @@ def main():
             "gateway's exit code. No effect outside an s6 container."
         ),
     )
+    gateway_run.add_argument(
+        "--profile",
+        "-p",
+        dest="profile",
+        help="Run the gateway under a specific Hermes profile",
+    )
     _add_accept_hooks_flag(gateway_run)
     _add_accept_hooks_flag(gateway_parser)
 

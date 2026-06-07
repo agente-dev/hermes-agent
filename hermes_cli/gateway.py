@@ -5987,6 +5987,14 @@ def _gateway_command_inner(args):
         verbose = getattr(args, "verbose", 0)
         quiet = getattr(args, "quiet", False)
         replace = getattr(args, "replace", False)
+        profile = getattr(args, "profile", None)
+        if profile:
+            from hermes_cli.profiles import resolve_profile_env
+            try:
+                os.environ["HERMES_HOME"] = resolve_profile_env(profile)
+            except (ValueError, FileNotFoundError) as exc:
+                print_error(f"Profile '{profile}' is not valid: {exc}")
+                sys.exit(1)
         run_gateway(verbose, quiet=quiet, replace=replace)
         return
 

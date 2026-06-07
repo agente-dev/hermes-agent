@@ -19453,6 +19453,22 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     logger.info("Cron ticker stopped")
 
 
+def _resolve_active_gateway_profile() -> Optional[str]:
+    """Return the profile display name when the gateway is profile-scoped.
+
+    Uses the same heuristic as _apply_profile_override() in
+    hermes_cli/main.py: a HERMES_HOME whose parent directory is
+    named "profiles" indicates a profile-scoped instance.
+    Returns the profile name (HERMES_HOME basename) or None
+    when running under the default profile.
+    """
+    hermes_home = str(get_hermes_home())
+    hermes_path = Path(hermes_home).resolve()
+    if hermes_path.parent.name == "profiles":
+        return hermes_path.name
+    return None
+
+
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
     """
     Start the gateway and run until interrupted.
@@ -19467,10 +19483,17 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                  Useful for systemd services to avoid restart-loop deadlocks
                  when the previous process hasn't fully exited yet.
     """
+    # ── Profile-scoped gateway support ─────────────────────────────────
+    # Resolve the active profile name at startup so operators can see
+    # which profile this gateway instance belongs to. HERMES_HOME is
+    # already set by the CLI entry point before any module imports, but
+    # resolving the display name early also validates the profile exists.
+    _gateway_profile_name = _resolve_active_gateway_profile()
+
     # ── Duplicate-instance guard ──────────────────────────────────────
     # Prevent two gateways from running under the same HERMES_HOME.
-    # The PID file is scoped to HERMES_HOME, so future multi-profile
-    # setups (each profile using a distinct HERMES_HOME) will naturally
+    # The PID file is scoped to HERMES_HOME, so multi-profile
+    # setups (each profile using a distinct HERMES_HOME) naturally
     # allow concurrent instances without tripping this guard.
     from gateway.status import (
         acquire_gateway_runtime_lock,
@@ -19588,6 +19611,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Idempotent, so repeated calls from AIAgent.__init__ won't duplicate.
     from hermes_logging import setup_logging
     setup_logging(hermes_home=_hermes_home, mode="gateway")
+
+    if _gateway_profile_name:
+        logger.info(
+            "Gateway starting under profile %r (HERMES_HOME=%s)",
+            _gateway_profile_name, _hermes_home,
+        )
 
     # Optional stderr handler — level driven by -v/-q flags on the CLI.
     # verbosity=None (-q/--quiet): no stderr output
