@@ -6,7 +6,9 @@ rather than leaving zombie processes or telling users to manually restart
 when launchd will auto-respawn.
 """
 
+import os
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -123,6 +125,7 @@ def mock_args():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchd is macOS-only")
 class TestLaunchdPlistReplace:
     """The generated launchd plist must include --replace so respawned
     gateways kill stale instances."""
@@ -148,6 +151,7 @@ class TestLaunchdPlistReplace:
         assert replace_idx == run_idx + 1
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchd is macOS-only")
 class TestLaunchdPlistPath:
     def test_plist_contains_environment_variables(self):
         plist = gateway_cli.generate_launchd_plist()
@@ -211,6 +215,7 @@ class TestLaunchdPlistPath:
             raise AssertionError("PATH key not found in plist")
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchd is macOS-only")
 class TestLaunchdPlistCurrentness:
     def test_launchd_plist_is_current_ignores_path_drift(self, tmp_path, monkeypatch):
         plist_path = tmp_path / "ai.hermes.gateway.plist"
@@ -229,6 +234,7 @@ class TestLaunchdPlistCurrentness:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchd is macOS-only")
 class TestLaunchdPlistRefresh:
     """refresh_launchd_plist_if_needed rewrites stale plists (like systemd's
     refresh_systemd_unit_if_needed)."""
@@ -1068,6 +1074,8 @@ class TestFindGatewayPidsExclude:
 
     def test_excludes_specified_pids(self, monkeypatch):
         monkeypatch.setattr(gateway_cli, "is_windows", lambda: False)
+        _real_isdir = os.path.isdir
+        monkeypatch.setattr(os.path, "isdir", lambda p: False if p == "/proc" else _real_isdir(p))
 
         def fake_run(cmd, **kwargs):
             return subprocess.CompletedProcess(
@@ -1088,6 +1096,8 @@ class TestFindGatewayPidsExclude:
 
     def test_no_exclude_returns_all(self, monkeypatch):
         monkeypatch.setattr(gateway_cli, "is_windows", lambda: False)
+        _real_isdir = os.path.isdir
+        monkeypatch.setattr(os.path, "isdir", lambda p: False if p == "/proc" else _real_isdir(p))
 
         def fake_run(cmd, **kwargs):
             return subprocess.CompletedProcess(
@@ -1110,6 +1120,8 @@ class TestFindGatewayPidsExclude:
         profile_dir = tmp_path / ".hermes" / "profiles" / "orcha"
         profile_dir.mkdir(parents=True)
         monkeypatch.setattr(gateway_cli, "is_windows", lambda: False)
+        _real_isdir = os.path.isdir
+        monkeypatch.setattr(os.path, "isdir", lambda p: False if p == "/proc" else _real_isdir(p))
         monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: profile_dir)
 
         def fake_run(cmd, **kwargs):

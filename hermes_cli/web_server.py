@@ -7152,6 +7152,44 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Skill authoring HTTP write surface (hermes-202606-010).
+# POST /api/skills (create a skill from a SKILL.md body) and
+# POST /api/sessions/{id}/promote-skill (derive a skill from session
+# transcript semantics). Both are thin wrappers around
+# ``tools.skill_manager_tool.skill_manage(action="create")``.
+# ---------------------------------------------------------------------------
+
+_PROMOTE_SKILL_MAX_TRANSCRIPT_CHARS = 6000
+_PROMOTE_SKILL_MAX_CONTEXT_MESSAGES = 200
+_PROMOTE_SKILL_CATEGORY = "agent-created"
+
+
+class SkillCreateBody(BaseModel):
+    """Request body for ``POST /api/skills``.
+
+    Operator-authored SKILL.md content submitted from the dashboard.
+    The frontmatter ``name`` field in the YAML frontmatter is authoritative;
+    the ``name`` key in the JSON body is used only for duplicate detection
+    before the parser runs.
+    """
+    name: str
+    content: str
+
+
+class PromoteSkillBody(BaseModel):
+    """Request body for ``POST /api/sessions/{id}/promote-skill``.
+
+    Operator-supplied identity for the new skill plus an optional count of
+    trailing session messages to review. ``context_messages`` null means
+    review the whole session; positive values use the last N messages.
+    """
+    skill_slug: str
+    skill_name: Optional[str] = None
+    description: Optional[str] = None
+    context_messages: Optional[int] = None
+
+
 class SkillToggle(BaseModel):
     name: str
     enabled: bool
@@ -7161,11 +7199,16 @@ class SkillToggle(BaseModel):
 async def get_skills():
     from tools.skills_tool import _find_all_skills
     from hermes_cli.skills_config import get_disabled_skills
+    from tools.skill_usage import get_record
     config = load_config()
     disabled = get_disabled_skills(config)
     skills = _find_all_skills(skip_disabled=True)
     for s in skills:
         s["enabled"] = s["name"] not in disabled
+        rec = get_record(str(s.get("name") or ""))
+        s["agent_created"] = (
+            rec.get("created_by") == "agent" or rec.get("agent_created") is True
+        )
     return skills
 
 
@@ -7180,6 +7223,236 @@ async def toggle_skill(body: SkillToggle):
         disabled.add(body.name)
     save_disabled_skills(config, disabled)
     return {"ok": True, "name": body.name, "enabled": body.enabled}
+
+
+def _skill_create_response(payload: Dict[str, Any], slug: str) -> Dict[str, Any]:
+    """Extract a skill-create action result into an HTTP response body."""
+    try:
+        result = json.loads(payload) if isinstance(payload, str) else payload
+    except (json.JSONDecodeError, TypeError):
+        result = {}
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=500, detail="Unexpected response from skill manager")
+    if result.get("success") is False:
+        raise HTTPException(status_code=400, detail=str(result.get("error", "Unknown error")))
+    return {
+        "ok": True,
+        "name": slug,
+        "skill_md": result.get("skill_md"),
+    }
+
+
+def _message_text(message: Dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        return "\n".join(part for part in text_parts if part)
+    return ""
+
+
+def _append_unique(items: List[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
+
+
+def _derive_workflow_steps(messages: List[Dict[str, Any]]) -> List[str]:
+    """Derive non-verbatim workflow bullets from operator turns.
+
+    This is the HTTP-safe equivalent of the skill-review prompt's
+    class-level skill guidance: identify reusable procedure semantics,
+    not session-specific transcript text. It intentionally uses coarse
+    categories and sanitized keywords so persisted SKILL.md files do not
+    copy private chat content.
+    """
+    user_texts = [
+        _message_text(msg).strip()
+        for msg in messages
+        if isinstance(msg, dict) and msg.get("role") == "user"
+    ]
+    user_texts = [text for text in user_texts if text]
+    combined = " ".join(user_texts).lower()
+    steps: List[str] = []
+
+    if any(term in combined for term in ("inbox", "email", "emails", "message", "messages")):
+        _append_unique(steps, "Organize inbox or message items by sender, source, or topic.")
+    if any(term in combined for term in ("invoice", "invoices", "receipt", "receipts", "tax", "vendor")):
+        _append_unique(steps, "Identify finance-related documents and prepare them for tax review.")
+    if any(term in combined for term in ("newsletter", "newsletters", "archive", "archived")):
+        _append_unique(steps, "Archive low-priority recurring updates after confirming they are safe to move.")
+    if any(term in combined for term in ("schedule", "weekly", "daily", "morning", "monday", "tuesday", "wednesday", "thursday", "friday")):
+        _append_unique(steps, "Apply the operator-requested cadence before scheduling or repeating the workflow.")
+    if any(term in combined for term in ("document", "documents", "file", "files", "report", "reports")):
+        _append_unique(steps, "Gather the relevant documents, files, or reports before producing the result.")
+
+    if steps:
+        return steps
+
+    return [
+        "Reconstruct the reusable workflow from the current operator context without storing raw transcript text."
+    ]
+
+
+def _distill_transcript_to_skill_md(
+    *,
+    slug: str,
+    display_name: str,
+    description: str,
+    messages: List[Dict[str, Any]],
+) -> str:
+    """Produce a valid SKILL.md from transcript semantics.
+
+    The HTTP endpoint keeps the existing skill-review contract's
+    class-level umbrella shape while staying synchronous and deterministic:
+    it derives reusable workflow bullets from operator turns, uses the
+    operator-supplied slug/name as hints, and writes through
+    ``skill_manage(action="create")`` under the background-review origin.
+
+    Sensitive evidence policy: per the intake, the promotion endpoint
+    must NOT serialise raw transcript content into the SKILL.md. The
+    persisted skill records only non-verbatim workflow semantics and
+    aggregate counts.
+    """
+    user_turn_count = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "user":
+            continue
+        user_turn_count += 1
+
+    reviewed_count = len(messages)
+    workflow_steps = _derive_workflow_steps(messages)
+    workflow_block = "\n".join(
+        f"{index}. {step}" for index, step in enumerate(workflow_steps, start=1)
+    )
+
+    body = (
+        f"# {display_name}\n\n"
+        f"{description}\n"
+        "\n## When to invoke\n\n"
+        f"Run this skill when the operator asks for the workflow named "
+        f"'{display_name}' or invokes the slash command `/{slug}`.\n"
+        "\n## Distilled Workflow\n\n"
+        f"{workflow_block}\n"
+        "\n## Operating Guardrails\n\n"
+        "1. Confirm the operator's current goal matches the workflow above.\n"
+        "2. Ask for any missing inputs needed to run the workflow safely.\n"
+        "3. Surface intermediate results so the operator can intervene before any external side effect.\n"
+        "4. When the workflow mutates external systems, use the normal Hermes approval gates.\n"
+        "\n## Promotion context\n\n"
+        f"- Reviewed {reviewed_count} session messages, including {user_turn_count} operator turns.\n"
+        "- Raw transcript content is intentionally omitted from this skill.\n"
+    )
+    frontmatter = (
+        "---\n"
+        f"name: {slug}\n"
+        f"description: {description}\n"
+        "---\n"
+    )
+    return frontmatter + body
+
+
+@app.post("/api/skills")
+async def create_skill(body: SkillCreateBody):
+    from tools.skill_manager_tool import skill_manage, _validate_frontmatter
+
+    slug = (body.name or "").strip()
+    content = (body.content or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="name is required.")
+    if not content:
+        raise HTTPException(status_code=400, detail="content is required.")
+
+    error = _validate_frontmatter(content)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+
+    raw = skill_manage(action="create", name=slug, content=content)
+    return _skill_create_response(raw, slug)
+
+
+@app.post("/api/sessions/{session_id}/promote-skill")
+async def promote_session_to_skill(session_id: str, body: PromoteSkillBody):
+    slug = str(body.skill_slug or "").strip()
+    if not slug:
+        raise HTTPException(
+            status_code=400,
+            detail="skill_slug must be a non-empty string that is safe for a slash command.",
+        )
+    if slug != slug.lower() or " " in slug:
+        raise HTTPException(
+            status_code=400,
+            detail="skill_slug must be lowercase with no spaces.",
+        )
+
+    display_name = str(body.skill_name or slug).strip() or slug
+    description = str(body.description or f"Derived from session {session_id}").strip()
+
+    context_n = body.context_messages
+    if context_n is not None:
+        context_n = int(context_n)
+        if context_n <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="context_messages must be a positive integer when provided.",
+            )
+        context_n = min(context_n, _PROMOTE_SKILL_MAX_CONTEXT_MESSAGES)
+
+    from hermes_state import SessionDB
+
+    db = SessionDB()
+    try:
+        session = db.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
+        all_messages = db.get_messages(session_id)
+    finally:
+        db.close()
+
+    tail_messages = (
+        all_messages
+        if context_n is None
+        else all_messages[-context_n:]
+    )
+
+    skill_md = _distill_transcript_to_skill_md(
+        slug=slug,
+        display_name=display_name,
+        description=description,
+        messages=tail_messages,
+    )
+
+    if len(skill_md) > _PROMOTE_SKILL_MAX_TRANSCRIPT_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail="Generated SKILL.md content exceeds the maximum allowed size.",
+        )
+
+    from tools.skill_manager_tool import skill_manage
+    from tools.skill_provenance import set_current_write_origin, BACKGROUND_REVIEW
+
+    token = set_current_write_origin(BACKGROUND_REVIEW)
+    try:
+        raw = skill_manage(
+            action="create",
+            name=slug,
+            content=skill_md,
+            category=_PROMOTE_SKILL_CATEGORY,
+        )
+    finally:
+        from tools.skill_provenance import reset_current_write_origin
+        reset_current_write_origin(token)
+
+    response = _skill_create_response(raw, slug)
+    response["skill_slug"] = slug
+    response["skill_name"] = display_name
+    return response
 
 
 @app.get("/api/tools/toolsets")
