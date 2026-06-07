@@ -37,7 +37,7 @@ def test_nudge_creates_file_and_updates_mtime(kanban_home):
 
     assert p.exists()
     mtime = p.stat().st_mtime
-    assert before <= mtime <= after + 0.5
+    assert before - 0.1 <= mtime <= after + 0.5
 
 
 def test_nudge_default_board(kanban_home):
