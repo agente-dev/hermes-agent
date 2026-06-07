@@ -1,0 +1,17 @@
+name: Dispatch Bump Event to agente-desktop
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository_dispatch
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.AGENTE_DESKTOP_DISPATCH_TOKEN }}
+          repository: agente-dev/agente-desktop
+          event-type: hermes-agent-push
+          client-payload: '{"sha": "${{ github.sha }}", "ref": "${{ github.ref }}"}'
