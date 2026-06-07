@@ -5977,11 +5977,40 @@ def _block_until_terminated() -> None:
         threading.Event().wait()
 
 
+def _apply_gateway_run_profile(args) -> None:
+    """If --profile was passed to ``gateway run``, resolve and set HERMES_HOME.
+
+    Mirrors the pattern from ``cron/scheduler.py::_job_profile_context()``
+    so the gateway sidecar runs scoped to a specific profile directory instead
+    of the default ~/.hermes root.  This is complementary to the global
+    ``--profile`` flag in ``_apply_profile_override()`` — that function
+    already sets HERMES_HOME before module imports, but it also strips the
+    flag from sys.argv.  When the flag is part of the ``gateway run``
+    subparser (``hermes gateway run --profile <name>``), we preserve it in
+    argv through to argparse and apply it here.
+    """
+    profile_name = getattr(args, "profile", None)
+    if not profile_name:
+        return
+    try:
+        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+        from hermes_constants import set_hermes_home_override
+
+        normalized = normalize_profile_name(str(profile_name).strip())
+        profile_home = str(resolve_profile_env(normalized).resolve())
+        os.environ["HERMES_HOME"] = profile_home
+        set_hermes_home_override(profile_home)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: invalid profile '{profile_name}': {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _gateway_command_inner(args):
     subcmd = getattr(args, "gateway_command", None)
 
     # Default to run if no subcommand
     if subcmd is None or subcmd == "run":
+        _apply_gateway_run_profile(args)
         if _maybe_redirect_run_to_s6_supervision(args):
             return  # unreachable; execvp doesn't return
         verbose = getattr(args, "verbose", 0)
