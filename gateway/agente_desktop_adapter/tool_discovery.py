@@ -798,7 +798,7 @@ async def _handle_list_tools(request: "web.Request", adapter: Any) -> "web.Respo
             }
             if entry is not None:
                 item["toolset"] = str(entry.toolset or "")
-                if entry.label_he:
+                if getattr(entry, 'label_he', None):
                     item["label_he"] = str(entry.label_he)
                 if entry.category:
                     item["category"] = str(entry.category)
