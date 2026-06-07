@@ -223,7 +223,7 @@ _LEGACY_TOOLSET_MAP = {
     "vision_tools": ["vision_analyze"],
     "moa_tools": ["mixture_of_agents"],
     "image_tools": ["image_generate"],
-    "skills_tools": ["skills_list", "skill_view", "skill_manage"],
+    "skills_tools": ["skills_list", "list_skills", "skill_view", "skill_manage"],
     "browser_tools": [
         "browser_navigate", "browser_snapshot", "browser_click",
         "browser_type", "browser_scroll", "browser_back",
@@ -231,6 +231,7 @@ _LEGACY_TOOLSET_MAP = {
         "browser_vision", "browser_console"
     ],
     "cronjob_tools": ["cronjob"],
+    "workflow_routine_tools": ["save_workflow", "create_routine"],
     "file_tools": ["read_file", "write_file", "patch", "search_files"],
     "tts_tools": ["text_to_speech"],
 }

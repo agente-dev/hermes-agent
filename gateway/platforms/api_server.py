@@ -1158,6 +1158,78 @@ class APIServerAdapter(BasePlatformAdapter):
             },
         })
 
+    async def _handle_execute_skill(self, request: "web.Request") -> "web.Response":
+        """POST /v1/agent/execute_skill — synchronous skill execution.
+
+        Parses a JSON body, validates skill_id, checks auth, and delegates to
+        :func:`tools.skill_executor.execute_skill`.  Maps the structured
+        :class:`~schemas.agent_execute.AgentExecuteResponse` to HTTP status codes:
+
+        - 200: status=ok
+        - 400: invalid JSON or missing skill_id
+        - 401: authentication required (when API key is configured)
+        - 404: skill_not_found
+        - 422: schema_violation (input or output)
+        - 500: unexpected errors (execution_failed, timeout, executor_unavailable)
+        """
+        auth_err = self._check_auth(request)
+        if auth_err is not None:
+            return auth_err
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({
+                "status": "error",
+                "skill_id": "",
+                "errors": [{"code": "invalid_request", "message": "Invalid JSON in request body"}],
+                "outputs": None,
+                "duration_seconds": None,
+            }, status=400)
+
+        skill_id = (body or {}).get("skill_id") if isinstance(body, dict) else None
+        if not skill_id or not isinstance(skill_id, str) or not skill_id.strip():
+            return web.json_response({
+                "status": "error",
+                "skill_id": skill_id or "",
+                "errors": [{"code": "invalid_request", "message": "Missing required field: skill_id"}],
+                "outputs": None,
+                "duration_seconds": None,
+            }, status=400)
+
+        from schemas.agent_execute import AgentExecuteRequest
+        from tools.skill_executor import execute_skill
+
+        try:
+            req = AgentExecuteRequest(**body)
+        except Exception:
+            return web.json_response({
+                "status": "error",
+                "skill_id": skill_id.strip() if skill_id else "",
+                "errors": [{"code": "invalid_request", "message": "Invalid request payload"}],
+                "outputs": None,
+                "duration_seconds": None,
+            }, status=400)
+
+        resp = await execute_skill(req)
+        http_status = self._execute_skill_http_status(resp)
+        return web.json_response(resp.model_dump(), status=http_status)
+
+    @staticmethod
+    def _execute_skill_http_status(resp) -> int:
+        if resp.status == "ok":
+            return 200
+        for err in resp.errors:
+            if err.code == "skill_not_found":
+                return 404
+            if err.code == "schema_violation":
+                return 422
+            if err.code == "executor_unavailable":
+                return 503
+        if resp.errors and resp.errors[0].code == "timeout":
+            return 504
+        return 500
+
     async def _handle_skills(self, request: "web.Request") -> "web.Response":
         """GET /v1/skills — list installed skills visible to the API-server agent.
 
@@ -3167,6 +3239,7 @@ class APIServerAdapter(BasePlatformAdapter):
             deliver = body.get("deliver", "local")
             skills = body.get("skills")
             repeat = body.get("repeat")
+            workflow_ids = body.get("workflow_ids")
 
             if not name:
                 return web.json_response({"error": "Name is required"}, status=400)
@@ -3194,6 +3267,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 kwargs["skills"] = skills
             if repeat is not None:
                 kwargs["repeat"] = repeat
+            if workflow_ids:
+                kwargs["workflow_ids"] = workflow_ids
 
             job = _cron_create(**kwargs)
             return web.json_response({"job": job})
@@ -4177,6 +4252,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
             self._app.router.add_post("/v1/runs/{run_id}/approval", self._handle_run_approval)
             self._app.router.add_post("/v1/runs/{run_id}/stop", self._handle_stop_run)
+            self._app.router.add_post("/v1/agent/execute_skill", self._handle_execute_skill)
 
             # Hermes <-> Desktop thin adapter boundary.
             # ONLY integration point allowed per hermes-upstream-compatibility-plan.md §3/5 and factory/contracts/hermes-upstream-compatibility.yml.
