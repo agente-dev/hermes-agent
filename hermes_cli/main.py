@@ -314,14 +314,31 @@ def _apply_profile_override() -> None:
     consume = 0
 
     # 1. Check for explicit -p / --profile flag
+    _gateway_run_flag = False
     for i, arg in enumerate(argv):
         if arg in {"--profile", "-p"} and i + 1 < len(argv):
             profile_name = argv[i + 1]
             consume = 2
+            # Check if this flag belongs to `hermes gateway run` subcommand
+            # (i.e. "gateway" followed by "run" appear BEFORE this flag).
+            _gateway_run_flag = any(
+                argv[j] == "gateway"
+                and j + 1 < len(argv)
+                and argv[j + 1] == "run"
+                and j < i
+                for j in range(len(argv))
+            )
             break
         elif arg.startswith("--profile="):
             profile_name = arg.split("=", 1)[1]
             consume = 1
+            _gateway_run_flag = any(
+                argv[j] == "gateway"
+                and j + 1 < len(argv)
+                and argv[j + 1] == "run"
+                and j < i
+                for j in range(len(argv))
+            )
             break
 
     # 1b. Reject values that can't be valid profile names (e.g. pytest's
@@ -380,15 +397,18 @@ def _apply_profile_override() -> None:
             )
             return
         os.environ["HERMES_HOME"] = hermes_home
-        # Strip the flag from argv so argparse doesn't choke
-        if consume > 0:
-            for i, arg in enumerate(argv):
+        # Strip the flag from argv so argparse doesn't choke.
+        # BUT: when --profile belongs to `hermes gateway run`, keep it in
+        # argv so argparse can validate it and the gateway handler can apply
+        # the profile-scoped sidecar explicitly.
+        if consume > 0 and not _gateway_run_flag:
+            for i2, arg in enumerate(argv):
                 if arg in {"--profile", "-p"}:
-                    start = i + 1  # +1 because argv is sys.argv[1:]
+                    start = i2 + 1
                     sys.argv = sys.argv[:start] + sys.argv[start + consume :]
                     break
                 elif arg.startswith("--profile="):
-                    start = i + 1
+                    start = i2 + 1
                     sys.argv = sys.argv[:start] + sys.argv[start + 1 :]
                     break
 
@@ -12956,6 +12976,13 @@ def main():
             "the container's main process and the container exits with the "
             "gateway's exit code. No effect outside an s6 container."
         ),
+    )
+    gateway_run.add_argument(
+        "-p",
+        "--profile",
+        type=str,
+        default=None,
+        help="Run gateway scoped to a specific profile (~/.hermes/profiles/<name>/)",
     )
     _add_accept_hooks_flag(gateway_run)
     _add_accept_hooks_flag(gateway_parser)
