@@ -199,6 +199,67 @@ async def test_api_tools_list_does_not_require_adapter_registry_loader(monkeypat
     assert payload["tools"][0]["toolset"] == "agente-desktop"
 
 
+@pytest.mark.asyncio
+async def test_api_tools_list_survives_tool_entry_without_category(monkeypatch):
+    """Regression: real ToolEntry uses __slots__ with NO `category` (or
+    `label_he`) slot, so attribute access raises AttributeError rather than
+    returning None. A bare `entry.category` therefore crashed
+    _handle_list_tools -> /api/tools 500 -> gateway health check failure ->
+    "Started 0/5 profile gateways". The guard must use getattr(..., None)."""
+    import tools.registry as registry_mod
+    from tools.registry import ToolEntry
+
+    # Construct a genuine ToolEntry to exercise the actual __slots__ shape that
+    # ships in the bundle (no `category`, no `label_he`).
+    real_entry = ToolEntry(
+        name="probe_tool",
+        toolset="agente-desktop",
+        schema={"type": "object"},
+        handler=lambda **_: None,
+        check_fn=None,
+        requires_env=None,
+        is_async=False,
+        description="Probe tool",
+        emoji=None,
+    )
+    assert not hasattr(real_entry, "category")
+    assert not hasattr(real_entry, "label_he")
+
+    class _Registry:
+        def get_all_tool_names(self) -> list[str]:
+            return ["probe_tool"]
+
+        def get_definitions(self, names: set[str], quiet: bool = False) -> list[dict[str, Any]]:  # noqa: ARG002
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "probe_tool",
+                        "description": "Probe tool",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ]
+
+        def get_entry(self, name: str) -> ToolEntry | None:
+            return real_entry if name == "probe_tool" else None
+
+    class _AdapterWithoutLoader:
+        def _check_auth(self, request: Any) -> None:  # noqa: ARG002
+            return None
+
+    monkeypatch.setattr(registry_mod, "registry", _Registry())
+
+    response = await tool_discovery._handle_list_tools(object(), _AdapterWithoutLoader())
+    assert response.status == 200
+    payload = json.loads(response.text)
+    assert payload["tools"][0]["name"] == "probe_tool"
+    assert payload["tools"][0]["toolset"] == "agente-desktop"
+    # category/label_he simply omitted when the slot is absent.
+    assert "category" not in payload["tools"][0]
+    assert "label_he" not in payload["tools"][0]
+
+
 def test_evaluate_triage_rules_schema_present():
     schema = TOOL_SCHEMAS.get("evaluate_triage_rules")
     assert schema is not None, "evaluate_triage_rules missing"
