@@ -800,7 +800,7 @@ async def _handle_list_tools(request: "web.Request", adapter: Any) -> "web.Respo
                 item["toolset"] = str(entry.toolset or "")
                 if getattr(entry, 'label_he', None):
                     item["label_he"] = str(entry.label_he)
-                if entry.category:
+                if getattr(entry, 'category', None):
                     item["category"] = str(entry.category)
             tools.append(item)
         return web.json_response({"tools": tools})
