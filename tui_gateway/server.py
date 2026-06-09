@@ -8284,3 +8284,12 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5002, "command timed out (30s)")
     except Exception as e:
         return _err(rid, 5003, str(e))
+
+
+try:
+    from gateway.agente_desktop_adapter import register_gateway_methods as _reg_gw_methods
+    from gateway.agente_desktop_adapter import subscription_oauth as _sub_oauth
+    _reg_gw_methods(None)
+    _oauth_subscription_sessions = _sub_oauth._oauth_subscription_sessions
+except Exception:
+    pass
