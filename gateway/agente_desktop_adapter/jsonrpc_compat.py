@@ -13,6 +13,7 @@ block in api_server.py) so that upstream-only builds simply lack the route.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict
 
@@ -77,18 +78,53 @@ def register(app: Any, adapter: Any = None) -> None:
             adapter._dispatch_tui_rpc = _wrapped  # type: ignore[attr-defined]
             logger.debug("agente_desktop_adapter.jsonrpc_compat: aliases patched into _dispatch_tui_rpc")
     except Exception as exc:
-        logger.debug("jsonrpc_compat alias patch skipped: %s", exc)
+        logger.warning("jsonrpc_compat alias patch skipped: %s", exc)
 
     # Add the /rpc route here (was ad-hoc desktop block in api_server).
     try:
         from aiohttp import web
-        # Only add if the core didn't (we removed the add in api_server cleanup).
-        paths = {r.path for r in app.router.routes()}
-        if "/rpc" not in paths:
+
+        existing_paths = set()
+        for r in app.router.routes():
+            try:
+                existing_paths.add(r.resource.canonical)
+            except AttributeError:
+                try:
+                    existing_paths.add(r.path)
+                except AttributeError:
+                    pass
+
+        if "/rpc" not in existing_paths:
             async def rpc_handler(req: "web.Request") -> "web.Response":
-                # delegate to the (now generic) handler on adapter
-                return await adapter._handle_rpc(req)
+                import tui_gateway.server as _tui_server
+
+                try:
+                    body = await req.json()
+                except Exception:
+                    return web.json_response(
+                        {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}},
+                        status=400,
+                    )
+
+                body = _apply_jsonrpc_desktop_aliases(body)
+                method_name = body.get("method", "")
+                handler_fn = _tui_server._methods.get(method_name)
+                if handler_fn is None:
+                    return web.json_response(
+                        {"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32601, "message": f"method not found: {method_name}"}},
+                    )
+                try:
+                    result = handler_fn(body.get("id"), body.get("params", {}))
+                except Exception as exc:
+                    logger.warning("jsonrpc_compat /rpc handler error for method %s: %s", method_name, exc)
+                    return web.json_response(
+                        {"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32603, "message": "internal error"}},
+                    )
+                return web.json_response(result)
+
             app.router.add_post("/rpc", rpc_handler)
             logger.debug("agente_desktop_adapter.jsonrpc_compat: /rpc route added via adapter")
+        else:
+            logger.debug("agente_desktop_adapter.jsonrpc_compat: /rpc route already present, skipping")
     except Exception as exc:
-        logger.debug("jsonrpc_compat /rpc route add skipped: %s", exc)
+        logger.warning("jsonrpc_compat /rpc route add failed: %s", exc)
