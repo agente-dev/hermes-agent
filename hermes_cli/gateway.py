@@ -5997,7 +5997,11 @@ def _apply_gateway_run_profile(args) -> None:
         from hermes_constants import set_hermes_home_override
 
         normalized = normalize_profile_name(str(profile_name).strip())
-        profile_home = str(resolve_profile_env(normalized).resolve())
+        # resolve_profile_env() returns an already-absolute path *string*
+        # (it wraps an absolute pathlib.Path from get_profile_dir()).  Do NOT
+        # call .resolve() on it — that is a Path method and raises
+        # AttributeError on a str, crashing `gateway run -p <profile>`.
+        profile_home = resolve_profile_env(normalized)
         os.environ["HERMES_HOME"] = profile_home
         set_hermes_home_override(profile_home)
     except (FileNotFoundError, ValueError) as exc:
