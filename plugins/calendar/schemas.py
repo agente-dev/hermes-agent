@@ -14,7 +14,7 @@ LIST_CALENDAR_EVENTS_SCHEMA: Dict[str, Any] = {
     "name": "list_calendar_events",
     "description": (
         "List Google Calendar events between two ISO-8601 timestamps. "
-        "Shells `gws calendar list --from <after> --to <before> --json` and "
+        "Shells `gws calendar events list --params '{\"calendarId\":...,\"timeMin\":...,...}'` and "
         "returns the parsed event list. OAuth is owned by gws; this tool "
         "never sees a token."
     ),
@@ -52,8 +52,7 @@ CREATE_CALENDAR_EVENT_SCHEMA: Dict[str, Any] = {
     "name": "create_calendar_event",
     "description": (
         "Create a new Google Calendar event. Shells "
-        "`gws calendar create --title <title> --start <start> --end <end> "
-        "[--attendees a,b] [--description <desc>] --json` and returns the "
+        "`gws calendar events insert --params '{\"calendarId\":...}' --body '{\"summary\":...,...}'` and returns the "
         "created event id + html link. Hebrew/RTL titles are preserved verbatim."
     ),
     "label_he": "יצירת אירוע ביומן",
@@ -84,7 +83,7 @@ GET_CALENDAR_EVENT_SCHEMA: Dict[str, Any] = {
     "name": "get_calendar_event",
     "description": (
         "Fetch a single Google Calendar event by id. Shells "
-        "`gws calendar get --event <event_id> --json` and returns the parsed event."
+        "`gws calendar events get --params '{\"calendarId\":...,\"eventId\":...}'` and returns the parsed event."
     ),
     "label_he": "פרטי אירוע ביומן",
     "category": "calendar",
