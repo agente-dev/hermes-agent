@@ -117,16 +117,22 @@ def list_calendar_events(
 ) -> List[Dict[str, Any]]:
     """List events between *after* and *before*.
 
-    Returns the JSON array emitted by ``gws calendar list ... --json``.
+    Returns the JSON array emitted by ``gws calendar events list --params ...``.
     """
-    args = ["calendar", "list", "--from", after, "--to", before, "--json"]
-    if calendar_id:
-        args += ["--calendar", calendar_id]
+    params: Dict[str, Any] = {
+        "calendarId": calendar_id or "primary",
+        "timeMin": after,
+        "timeMax": before,
+        "singleEvents": True,
+        "orderBy": "startTime",
+    }
     if limit is not None:
-        args += ["--limit", str(int(limit))]
-    res = _gws_json(args)
+        params["maxResults"] = int(limit)
+    res = _gws_json(["calendar", "events", "list", "--params", json.dumps(params)])
     if res is None:
         return []
+    if isinstance(res, dict) and "items" in res:
+        return list(res["items"])
     if isinstance(res, dict) and "events" in res:
         return list(res["events"])
     if isinstance(res, list):
@@ -142,23 +148,26 @@ def create_calendar_event(
     description: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new event. Returns the created event dict from gws."""
-    args = [
-        "calendar", "create",
-        "--title", title,
-        "--start", start,
-        "--end", end,
-        "--json",
-    ]
+    body: Dict[str, Any] = {
+        "summary": title,
+        "start": {"dateTime": start, "timeZone": "UTC"},
+        "end": {"dateTime": end, "timeZone": "UTC"},
+    }
     if attendees:
-        args += ["--attendees", ",".join(attendees)]
+        body["attendees"] = [{"email": a} for a in attendees]
     if description:
-        args += ["--description", description]
-    res = _gws_json(args)
+        body["description"] = description
+    params = {"calendarId": "primary"}
+    res = _gws_json([
+        "calendar", "events", "insert",
+        "--params", json.dumps(params),
+        "--body", json.dumps(body),
+    ])
     return res if isinstance(res, dict) else {"event": res}
 
 
 def get_calendar_event(event_id: str) -> Dict[str, Any]:
     """Fetch a single event by id."""
-    args = ["calendar", "get", "--event", event_id, "--json"]
-    res = _gws_json(args)
+    params = {"calendarId": "primary", "eventId": event_id}
+    res = _gws_json(["calendar", "events", "get", "--params", json.dumps(params)])
     return res if isinstance(res, dict) else {"event": res}
