@@ -285,3 +285,32 @@ def handle_submit_oauth_code(
             "label": entry.label,
         },
     )
+
+
+def handle_poll_subscription_oauth(
+    rid: Any,
+    params: dict,
+    emit_fn,
+) -> dict:
+    _oauth_subscription_gc()
+    sid = (params.get("session_id") or "").strip()
+    if not sid:
+        return _err(rid, 4002, "session_id required")
+
+    with _oauth_subscription_lock:
+        state = _oauth_subscription_sessions.get(sid)
+
+    if state is None:
+        return _ok(rid, {"status": "completed"})
+
+    provider = state.get("provider", "")
+    status = state.get("status", "pending")
+    result = {
+        "provider": provider,
+        "status": status,
+        "label": state.get("label"),
+    }
+    if state.get("error"):
+        result["error_message"] = state["error"]
+        result["error_he"] = "ההתחברות נכשלה"
+    return _ok(rid, result)

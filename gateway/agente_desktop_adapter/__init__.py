@@ -43,5 +43,9 @@ def register_gateway_methods(server_module):
     def _submit(rid, params):
         return subscription_oauth.handle_submit_oauth_code(rid, params, _emit)
 
+    def _poll(rid, params):
+        return subscription_oauth.handle_poll_subscription_oauth(rid, params, _emit)
+
     _svr._methods["auth.start_subscription_oauth"] = _start
     _svr._methods["auth.submit_oauth_code"] = _submit
+    _svr._methods["auth.poll_subscription_oauth"] = _poll
