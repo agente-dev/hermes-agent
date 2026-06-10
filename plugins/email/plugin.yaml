@@ -1,6 +1,6 @@
 name: email
 version: 0.1.0
-description: "Gmail connector — 5 tools (list_emails, read_email, draft_reply, send_email, mark_email) implemented as a thin subprocess wrapper over the bundled `gws` (googleworkspace/cli) binary. OAuth, token storage, and refresh are owned entirely by gws. Resolves the binary via companion-provided GWS bin env with a PATH fallback."
+description: "Gmail connector — thin subprocess wrapper over the bundled gws (googleworkspace/cli) binary. OAuth, token storage, and refresh are owned entirely by gws. Exposes reading, searching, triage, threading, replying, forwarding, drafting, labeling, and batch operations over the full Gmail API surface via gws helpers and raw API calls."
 author: NousResearch
 kind: backend
 scopes:
@@ -11,9 +11,33 @@ operator_visible_surface:
   - "Draft reply"
   - "Send email"
   - "Modify labels (mark read/unread, archive, star)"
+  - "Full-text email search (Gmail q syntax)"
+  - "Inbox triage"
+  - "Read email with attachment metadata"
+  - "Thread view"
+  - "Reply / reply-all / forward"
+  - "Draft + send draft"
+  - "Label management (list, apply, batch)"
+  - "Trash and archive"
 provides_tools:
   - list_emails
   - read_email
   - draft_reply
   - send_email
   - mark_email
+  - search_emails
+  - triage_inbox
+  - read_email_attachments
+  - get_thread
+  - reply_email
+  - reply_all_email
+  - forward_email
+  - draft_email
+  - send_draft
+  - list_labels
+  - apply_label
+  - trash_email
+  - batch_modify
+  - mark_read
+  - mark_unread
+  - archive_email
