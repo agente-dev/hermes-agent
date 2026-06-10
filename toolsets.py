@@ -54,6 +54,8 @@ _HERMES_CORE_TOOLS = [
     "clarify",
     # Code execution + delegation
     "execute_code", "delegate_task",
+    # Cross-profile agent delegation
+    "call_profile",
     # Cronjob management
     "cronjob",
     # Workflow persistence & scheduling
@@ -199,6 +201,11 @@ TOOLSETS = {
         "includes": []
     },
 
+    "profiles": {
+        "description": "Cross-profile agent delegation: call another profile's agent and stream results back inline",
+        "tools": ["call_profile"],
+        "includes": []
+    },
     
     "file": {
         "description": "File manipulation tools: read, write, patch (with fuzzy matching), and search (content + files)",
