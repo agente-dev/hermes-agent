@@ -182,8 +182,8 @@ def test_schema_has_label_he_and_category(schema: dict) -> None:
     assert schema.get("category") == "calendar"
 
 
-def test_register_wires_all_three_tools() -> None:
-    """Plugin must register exactly the three tools declared in plugin.yaml."""
+def test_register_wires_all_tools() -> None:
+    """Plugin must register exactly the tools declared in plugin.yaml."""
     calls: list[dict] = []
 
     class _Ctx:
@@ -192,6 +192,11 @@ def test_register_wires_all_three_tools() -> None:
 
     calendar_pkg.register(_Ctx())
     names = sorted(c["name"] for c in calls)
-    assert names == ["create_calendar_event", "get_calendar_event", "list_calendar_events"]
+    assert names == [
+        "agenda", "check_availability", "create_calendar_event",
+        "delete_calendar_event", "get_calendar_event", "list_calendar_events",
+        "list_calendars", "quick_add_event", "search_calendar_events",
+        "update_calendar_event",
+    ]
     for c in calls:
         assert c["toolset"] == "calendar"

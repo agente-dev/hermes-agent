@@ -224,8 +224,8 @@ class _FakeCtx:
         self.tools.append(kw)
 
 
-def test_register_exposes_five_tools(monkeypatch):
-    """plugins.email.register() should publish exactly five tools in the `email` toolset."""
+def test_register_exposes_tools(monkeypatch):
+    """plugins.email.register() should publish all email tools in the `email` toolset."""
     monkeypatch.setenv("AGENTE_GWS_BIN", "/fake/bin/gws")
     # Lazy import so the test does not require the full hermes_cli during collection.
     sys.path.insert(0, str(REPO_ROOT))
@@ -249,7 +249,15 @@ def test_register_exposes_five_tools(monkeypatch):
     pkg.register(ctx)
 
     names = [t["name"] for t in ctx.tools]
-    assert names == ["list_emails", "read_email", "draft_reply", "send_email", "mark_email"]
+    expected = [
+        "apply_label", "archive_email", "batch_modify", "draft_email",
+        "draft_reply", "forward_email", "get_thread", "list_emails",
+        "list_labels", "mark_email", "mark_read", "mark_unread",
+        "read_email", "read_email_attachments", "reply_all_email",
+        "reply_email", "search_emails", "send_draft", "send_email",
+        "trash_email", "triage_inbox",
+    ]
+    assert sorted(names) == expected
     for t in ctx.tools:
         assert t["toolset"] == "email"
         assert "parameters" in t["schema"]
