@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 
 from tools.registry import registry, tool_error, tool_result
 
@@ -111,9 +110,6 @@ def _read_profile_api_config(profile_dir):
                             port = int(api_port)
                         except (ValueError, TypeError):
                             pass
-
-    if not api_key:
-        api_key = os.environ.get("API_SERVER_KEY", "")
 
     return port, api_key
 
