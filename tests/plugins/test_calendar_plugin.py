@@ -29,25 +29,25 @@ _STUB_SCRIPT = textwrap.dedent(
     """\
     #!/usr/bin/env bash
     # Fake gws — emits canned JSON per subcommand for tests.
-    sub="$2"
-    case "$sub" in
+    action="$3"
+    case "$action" in
       list)
         echo '[{"id":"evt1","start":"2026-06-02T09:00:00Z","end":"2026-06-02T10:00:00Z","title":"פגישה עם לקוח"}]'
         ;;
-      create)
-        # Echo the title arg back so we can verify Hebrew/RTL passthrough.
-        title=""
+      insert)
+        # Parse --body JSON for the summary (Hebrew/RTL passthrough test).
+        body_json=""
         while [ "$#" -gt 0 ]; do
-          if [ "$1" = "--title" ]; then title="$2"; fi
-          shift
+          if [ "$1" = "--body" ]; then body_json="$2"; shift 2; else shift; fi
         done
-        printf '{"id":"new-evt","htmlLink":"https://calendar.google.com/event?eid=x","title":%s}\\n' "$(printf '%s' "$title" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')"
+        title="$(printf '%s' "$body_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("summary",""))' 2>/dev/null)"
+        printf '{"id":"new-evt","htmlLink":"https://calendar.google.com/event?eid=x","summary":%s}\\n' "$(printf '%s' "$title" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')"
         ;;
       get)
         echo '{"id":"evt1","start":"2026-06-02T09:00:00Z","end":"2026-06-02T10:00:00Z"}'
         ;;
       *)
-        echo "unknown subcommand: $sub" >&2
+        echo "unknown calendar action: $action" >&2
         exit 2
         ;;
     esac
@@ -95,9 +95,9 @@ def test_create_calendar_event_preserves_hebrew_title(fake_gws: Path) -> None:
         description="מעקב חשבונית",
     )
     assert event["id"] == "new-evt"
-    # The stub echoes the title verbatim — proves the Hebrew title round-trips
-    # through argv → stdout JSON → json.loads.
-    assert event["title"] == "ישיבה עם רואה החשבון"
+    # The stub echoes the summary verbatim — proves the Hebrew title round-trips
+    # through --body JSON → stdout JSON → json.loads.
+    assert event["summary"] == "ישיבה עם רואה החשבון"
 
 
 def test_get_calendar_event(fake_gws: Path) -> None:
