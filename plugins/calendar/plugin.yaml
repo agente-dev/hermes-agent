@@ -11,3 +11,10 @@ provides_tools:
   - list_calendar_events
   - create_calendar_event
   - get_calendar_event
+  - search_calendar_events
+  - agenda
+  - quick_add_event
+  - update_calendar_event
+  - delete_calendar_event
+  - check_availability
+  - list_calendars

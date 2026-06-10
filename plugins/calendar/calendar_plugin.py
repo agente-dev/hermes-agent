@@ -171,3 +171,144 @@ def get_calendar_event(event_id: str) -> Dict[str, Any]:
     params = {"calendarId": "primary", "eventId": event_id}
     res = _gws_json(["calendar", "events", "get", "--params", json.dumps(params)])
     return res if isinstance(res, dict) else {"event": res}
+
+
+def search_calendar_events(
+    query: Optional[str] = None,
+    time_min: Optional[str] = None,
+    time_max: Optional[str] = None,
+    max_results: int = 100,
+    single_events: bool = True,
+    order_by: str = "startTime",
+) -> List[Dict[str, Any]]:
+    """Search calendar events via the Gmail API events.list endpoint.
+
+    Returns the ``items`` array from the response, or an empty list.
+    """
+    params: Dict[str, Any] = {
+        "calendarId": "primary",
+        "maxResults": max_results,
+        "singleEvents": single_events,
+        "orderBy": order_by,
+    }
+    if query is not None:
+        params["q"] = query
+    if time_min is not None:
+        params["timeMin"] = time_min
+    if time_max is not None:
+        params["timeMax"] = time_max
+
+    res = _gws_json(["calendar", "events", "list", "--params", json.dumps(params)])
+    if res is None:
+        return []
+    if isinstance(res, dict) and "items" in res:
+        return list(res["items"])
+    if isinstance(res, list):
+        return res
+    return [res]
+
+
+def agenda(days: str = "today") -> List[Dict[str, Any]]:
+    """Return an agenda view for *days*.
+
+    *days* can be ``"today"``, ``"week"``, or a number like ``"7"``.
+    Uses ``gws calendar +agenda`` with the appropriate flag.
+    """
+    if days == "today":
+        args = ["calendar", "+agenda", "--today"]
+    elif days == "week":
+        args = ["calendar", "+agenda", "--week"]
+    else:
+        args = ["calendar", "+agenda", "--days", days, "--json"]
+    res = _gws_json(args)
+    if res is None:
+        return []
+    if isinstance(res, list):
+        return res
+    if isinstance(res, dict) and "items" in res:
+        return list(res["items"])
+    return [res]
+
+
+def quick_add_event(text: str) -> Dict[str, Any]:
+    """Create an event via Google Calendar's quick-add natural-language parser."""
+    res = _gws_json(["calendar", "+quickadd", "--text", text, "--json"])
+    return res if isinstance(res, dict) else {"event": res}
+
+
+def update_calendar_event(
+    event_id: str,
+    title: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    attendees: Optional[List[str]] = None,
+    description: Optional[str] = None,
+    send_updates: str = "all",
+) -> Dict[str, Any]:
+    """Patch an existing calendar event. Only supplied fields are updated.
+
+    Returns the updated event dict from gws.
+    """
+    params = {
+        "calendarId": "primary",
+        "eventId": event_id,
+        "sendUpdates": send_updates,
+    }
+    body: Dict[str, Any] = {}
+    if title is not None:
+        body["summary"] = title
+    if start is not None:
+        body["start"] = {"dateTime": start}
+    if end is not None:
+        body["end"] = {"dateTime": end}
+    if attendees is not None:
+        body["attendees"] = [{"email": a} for a in attendees]
+    if description is not None:
+        body["description"] = description
+
+    res = _gws_json([
+        "calendar", "events", "patch",
+        "--params", json.dumps(params),
+        "--body", json.dumps(body),
+    ])
+    return res if isinstance(res, dict) else {"event": res}
+
+
+def delete_calendar_event(
+    event_id: str,
+    send_updates: str = "all",
+) -> None:
+    """Delete a calendar event by id."""
+    params = {
+        "calendarId": "primary",
+        "eventId": event_id,
+        "sendUpdates": send_updates,
+    }
+    _gws_json(["calendar", "events", "delete", "--params", json.dumps(params)])
+
+
+def check_availability(
+    emails: List[str],
+    time_min: str,
+    time_max: str,
+) -> Dict[str, Any]:
+    """Query free/busy information for a list of attendees."""
+    params = {
+        "timeMin": time_min,
+        "timeMax": time_max,
+        "items": [{"id": email} for email in emails],
+    }
+    res = _gws_json(["calendar", "freebusy", "query", "--params", json.dumps(params)])
+    return res if isinstance(res, dict) else {"calendars": res}
+
+
+def list_calendars() -> List[Dict[str, Any]]:
+    """List all available calendars for the authenticated user."""
+    res = _gws_json(["calendar", "calendarList", "list", "--params", "{}", "--json"])
+    if res is None:
+        return []
+    if isinstance(res, dict) and "items" in res:
+        return list(res["items"])
+    if isinstance(res, list):
+        return res
+    return [res]

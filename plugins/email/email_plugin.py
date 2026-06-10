@@ -1,8 +1,7 @@
 """Email connector — thin subprocess wrapper over gws (googleworkspace/cli v0.22.5).
 
-Per `hermes-202605-014`, this plugin exposes five tools (list_emails, read_email,
-draft_reply, send_email, mark_email) that shell out to the bundled
-``googleworkspace/cli`` (``gws``) binary. OAuth, token storage, refresh, and
+Per `hermes-202605-014`, this plugin exposes email tools that shell out to the
+bundled ``googleworkspace/cli`` (``gws``) binary. OAuth, token storage, refresh, and
 account management are owned entirely by gws — this module never touches
 credentials.
 
@@ -132,3 +131,137 @@ def mark_email(message_id: str, add_label: str | None = None, remove_label: str 
     if remove_label:
         body["removeLabelIds"] = [remove_label]
     return _gws_json(["gmail", "users", "messages", "modify", "--params", json.dumps(params), "--body", json.dumps(body)])
+
+
+def search_emails(query: str, folder: str = "INBOX", max_results: int = 20, page_token: str | None = None) -> dict:
+    """Search emails with a Gmail ``q`` query string."""
+    params: dict[str, Any] = {
+        "userId": "me",
+        "q": query,
+        "maxResults": max_results,
+        "labelIds": [folder],
+    }
+    if page_token:
+        params["pageToken"] = page_token
+    return _gws_json(["gmail", "users", "messages", "list", "--params", json.dumps(params)])
+
+
+def triage_inbox(query: str | None = None, max_results: int = 50) -> dict:
+    """Quick inbox triage via the +triage gws helper."""
+    args = ["gmail", "+triage", "--max", str(max_results), "--format", "json"]
+    if query:
+        args.extend(["--query", query])
+    return _gws_json(args)
+
+
+def read_email_attachments(message_id: str) -> dict:
+    """Return message headers and attachment metadata for ``message_id``.
+
+    Downloads the full message payload and extracts attachment parts
+    (filename, mimeType, attachmentId). Returns a dict with ``headers``
+    and ``attachments`` keys. Actual binary download requires a separate
+    call to the Gmail attachments endpoint.
+    """
+    params = {"userId": "me", "id": message_id, "format": "full"}
+    result = _gws_json(["gmail", "users", "messages", "get", "--params", json.dumps(params)])
+    if isinstance(result, dict) and "error" in result:
+        return result
+
+    headers = result.get("payload", {}).get("headers", [])
+    parts = result.get("payload", {}).get("parts", [])
+
+    attachments: list[dict[str, str]] = []
+    for part in parts:
+        if part.get("filename") and part.get("body", {}).get("attachmentId"):
+            attachments.append({
+                "filename": part["filename"],
+                "mimeType": part.get("mimeType", ""),
+                "attachmentId": part["body"]["attachmentId"],
+                "size": str(part["body"].get("size", "")),
+                "partId": part.get("partId", ""),
+            })
+
+    return {"headers": headers, "attachments": attachments}
+
+
+def get_thread(thread_id: str) -> dict:
+    """Return a full Gmail thread with all messages."""
+    params = {"userId": "me", "id": thread_id, "format": "full"}
+    return _gws_json(["gmail", "users", "threads", "get", "--params", json.dumps(params)])
+
+
+def reply_email(message_id: str, body: str) -> dict:
+    """Reply to ``message_id`` (sender only) via gws +reply helper."""
+    return _gws_json(["gmail", "+reply", "--id", message_id, "--body", body])
+
+
+def reply_all_email(message_id: str, body: str) -> dict:
+    """Reply-all to ``message_id`` via gws +reply-all helper."""
+    return _gws_json(["gmail", "+reply-all", "--id", message_id, "--body", body])
+
+
+def forward_email(message_id: str, to: str) -> dict:
+    """Forward ``message_id`` to ``to`` via gws +forward helper."""
+    return _gws_json(["gmail", "+forward", "--id", message_id, "--to", to])
+
+
+def draft_email(to: str, subject: str, body: str) -> dict:
+    """Create a draft email without sending."""
+    params = {"userId": "me"}
+    raw = _encode_text_message(body, {"to": to, "subject": subject})
+    draft_body = {"message": {"raw": raw}}
+    return _gws_json(["gmail", "users", "drafts", "create", "--params", json.dumps(params), "--body", json.dumps(draft_body)])
+
+
+def send_draft(draft_id: str) -> dict:
+    """Send an existing draft by its ID."""
+    params = {"userId": "me"}
+    send_body = {"id": draft_id}
+    return _gws_json(["gmail", "users", "drafts", "send", "--params", json.dumps(params), "--body", json.dumps(send_body)])
+
+
+def list_labels() -> dict:
+    """List all Gmail labels."""
+    return _gws_json(["gmail", "users", "labels", "list", "--params", json.dumps({"userId": "me"})])
+
+
+def apply_label(message_id: str, add_labels: list[str] | None = None, remove_labels: list[str] | None = None) -> dict:
+    """Add and/or remove labels on a message."""
+    params = {"userId": "me", "id": message_id}
+    body: dict[str, Any] = {}
+    if add_labels:
+        body["addLabelIds"] = add_labels
+    if remove_labels:
+        body["removeLabelIds"] = remove_labels
+    return _gws_json(["gmail", "users", "messages", "modify", "--params", json.dumps(params), "--body", json.dumps(body)])
+
+
+def trash_email(message_id: str) -> dict:
+    """Move a message to trash."""
+    params = {"userId": "me", "id": message_id}
+    return _gws_json(["gmail", "users", "messages", "trash", "--params", json.dumps(params)])
+
+
+def batch_modify(message_ids: list[str], add_labels: list[str] | None = None, remove_labels: list[str] | None = None) -> dict:
+    """Batch-modify labels across multiple messages."""
+    body: dict[str, Any] = {"ids": message_ids}
+    if add_labels:
+        body["addLabelIds"] = add_labels
+    if remove_labels:
+        body["removeLabelIds"] = remove_labels
+    return _gws_json(["gmail", "users", "messages", "batchModify", "--params", json.dumps({"userId": "me"}), "--body", json.dumps(body)])
+
+
+def mark_read(message_id: str) -> dict:
+    """Mark a message as read (remove UNREAD label)."""
+    return apply_label(message_id, remove_labels=["UNREAD"])
+
+
+def mark_unread(message_id: str) -> dict:
+    """Mark a message as unread (add UNREAD label)."""
+    return apply_label(message_id, add_labels=["UNREAD"])
+
+
+def archive_email(message_id: str) -> dict:
+    """Archive a message (remove INBOX label)."""
+    return apply_label(message_id, remove_labels=["INBOX"])
