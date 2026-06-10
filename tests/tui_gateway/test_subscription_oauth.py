@@ -301,3 +301,83 @@ def test_exchange_anthropic_state_mismatch_returns_none():
     # because state validation runs first.
     out = exchange_anthropic_oauth_code("realcode#bad", "verifier", "expected_state")
     assert out is None
+
+
+# ── Poll ─────────────────────────────────────────────────────────────
+
+
+def test_poll_missing_session_returns_completed(server):
+    """poll on a missing session → {"status":"completed"} (anthropic post-submit rule)."""
+    resp = server.handle_request({
+        "id": "1",
+        "method": "auth.poll_subscription_oauth",
+        "params": {"session_id": "nonexistent-session-id"},
+    })
+    assert "result" in resp, resp
+    assert resp["result"]["status"] == "completed"
+
+
+def test_poll_missing_session_id_error(server):
+    resp = server.handle_request({
+        "id": "1",
+        "method": "auth.poll_subscription_oauth",
+        "params": {},
+    })
+    assert "error" in resp
+    assert resp["error"]["code"] == 4002
+
+
+def test_poll_codex_session_returns_structured_status(server):
+    """poll on a known codex session returns its structured status."""
+    resp = server.handle_request({
+        "id": "1",
+        "method": "auth.poll_subscription_oauth",
+        "params": {"session_id": "test-codex-sid"},
+    })
+    server._oauth_subscription_sessions["test-codex-sid"] = {
+        "provider": "openai-codex",
+        "status": "pending",
+        "label": None,
+        "expires_at": time.time() + 600,
+    }
+    resp = server.handle_request({
+        "id": "2",
+        "method": "auth.poll_subscription_oauth",
+        "params": {"session_id": "test-codex-sid"},
+    })
+    assert "result" in resp, resp
+    result = resp["result"]
+    assert result["provider"] == "openai-codex"
+    assert result["status"] == "pending"
+
+
+def test_poll_is_registered_no_32601(server):
+    """prove auth.poll_subscription_oauth is registered (no -32601)."""
+    assert "auth.poll_subscription_oauth" in server._methods, \
+        "auth.poll_subscription_oauth not registered in gateway methods"
+    resp = server.handle_request({
+        "id": "1",
+        "method": "auth.poll_subscription_oauth",
+        "params": {"session_id": "some-id"},
+    })
+    assert "error" not in resp or resp.get("error", {}).get("code") != -32601, \
+        f"Got -32601 — method not registered: {resp}"
+
+
+def test_poll_anthropic_session_pending_before_submit(server):
+    """anthropic session without status key (code not yet submitted) → pending."""
+    server._oauth_subscription_sessions["anthro-sid"] = {
+        "provider": "anthropic",
+        "code_verifier": "v",
+        "state": "s",
+        "expires_at": time.time() + 600,
+    }
+    resp = server.handle_request({
+        "id": "1",
+        "method": "auth.poll_subscription_oauth",
+        "params": {"session_id": "anthro-sid"},
+    })
+    assert "result" in resp, resp
+    result = resp["result"]
+    assert result["provider"] == "anthropic"
+    assert result["status"] == "pending"
