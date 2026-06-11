@@ -444,10 +444,13 @@ def handle_browser_get(args: Dict[str, Any], **_kw) -> str:
 def handle_browser_find(args: Dict[str, Any], **_kw) -> str:
     locator = (args.get("locator") or "").strip()
     value = (args.get("value") or "").strip()
+    selector = (args.get("selector") or "").strip()
     if not locator:
         return json.dumps({"success": False, "error": "locator is required"})
     if not value:
         return json.dumps({"success": False, "error": "value is required"})
+    if locator == "nth" and not selector:
+        return json.dumps({"success": False, "error": "selector is required for nth"})
     action = (args.get("action") or "click").strip()
     text = args.get("text")
     supported_actions = {"click", "fill", "type", "hover", "focus", "check", "uncheck"}
@@ -459,7 +462,10 @@ def handle_browser_find(args: Dict[str, Any], **_kw) -> str:
     )
     if not approval.get("approved", False):
         return json.dumps({"success": False, "error": "approval denied", "approval": approval})
-    argv: List[str] = ["find", locator, value, action]
+    if locator == "nth":
+        argv: List[str] = ["find", locator, value, selector, action]
+    else:
+        argv = ["find", locator, value, action]
     if text is not None and action in {"type", "fill"}:
         argv.append(str(text))
     return json.dumps(_run_agent_browser(argv), ensure_ascii=False)

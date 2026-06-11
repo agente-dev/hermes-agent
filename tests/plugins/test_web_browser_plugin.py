@@ -383,6 +383,34 @@ def test_find_defaults_to_supported_click_action():
     assert run_mock.call_args[0][0][1:] == ["find", "text", "Sign In", "click", "--json"]
 
 
+def test_find_nth_argv_uses_index_then_selector():
+    from plugins.web_browser import web_browser_plugin as wbp
+
+    with _approve_all(), _stub_binary(), \
+         patch("plugins.web_browser.web_browser_plugin.subprocess.run",
+               return_value=_completed(stdout='{"ok":true}')) as run_mock:
+        wbp.handle_browser_find({
+            "locator": "nth",
+            "value": "2",
+            "selector": ".card",
+            "action": "hover",
+        })
+
+    assert run_mock.call_args[0][0][1:] == ["find", "nth", "2", ".card", "hover", "--json"]
+
+
+def test_find_nth_requires_selector():
+    from plugins.web_browser import web_browser_plugin as wbp
+
+    with _approve_all(), _stub_binary(), \
+         patch("plugins.web_browser.web_browser_plugin.subprocess.run") as run_mock:
+        out = wbp.handle_browser_find({"locator": "nth", "value": "2", "action": "hover"})
+
+    run_mock.assert_not_called()
+    assert json.loads(out)["success"] is False
+    assert "selector is required" in json.loads(out)["error"]
+
+
 def test_find_rejects_unsupported_legacy_actions():
     from plugins.web_browser import web_browser_plugin as wbp
 

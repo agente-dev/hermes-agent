@@ -180,7 +180,8 @@ BROWSER_FIND_SCHEMA = _tool(
     "חיפוש אלמנט",
     "Find an element by role / text / label / placeholder / alt / title / testid "
     "and optionally act on it. Wraps `agent-browser find <locator> <value> "
-    "<action> [text]`.",
+    "<action> [text]`; for locator=nth, wraps "
+    "`agent-browser find nth <index> <selector> <action> [text]`.",
     {
         "type": "object",
         "properties": {
@@ -190,6 +191,7 @@ BROWSER_FIND_SCHEMA = _tool(
                 "description": "Locator strategy.",
             },
             "value": {"type": "string", "description": "Locator value (e.g. role name, text content, testid)."},
+            "selector": {"type": "string", "description": "Only used when locator='nth' — selector to index into."},
             "action": {
                 "type": "string",
                 "enum": ["click", "type", "fill", "hover", "focus", "check", "uncheck"],
