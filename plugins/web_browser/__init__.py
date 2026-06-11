@@ -16,6 +16,7 @@ dangerous-command tool.
 
 from __future__ import annotations
 
+import inspect
 import logging
 
 from plugins.web_browser.web_browser_plugin import (
@@ -27,27 +28,46 @@ from plugins.web_browser.web_browser_plugin import (
 logger = logging.getLogger(__name__)
 
 
+def _register_tool(ctx, **kwargs) -> None:
+    register_tool = ctx.register_tool
+    try:
+        signature = inspect.signature(register_tool)
+    except (TypeError, ValueError):
+        supports_override = True
+    else:
+        supports_override = "override" in signature.parameters or any(
+            param.kind is inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+
+    if supports_override:
+        kwargs["override"] = True
+    register_tool(**kwargs)
+
+
 def register(ctx) -> None:
     """Register all ten browser_* tools.
 
     Called once by the plugin loader when ``plugins.enabled`` includes
     ``web_browser`` in config.yaml.
 
-    ``override=True`` because Hermes ships a built-in
+    Hermes ships a built-in
     ``browser_navigate`` / ``browser_click`` / ... family in
-    ``tools/browser_tool.py`` (Playwright-direct). This plugin replaces them
-    with the agent-browser CLI implementation so a single global
-    ``agent-browser`` install services every Hermes operator.
+    ``tools/browser_tool.py`` (Playwright-direct). When the host context
+    supports explicit overrides, this plugin replaces them with the
+    agent-browser CLI implementation so a single global ``agent-browser``
+    install services every Hermes operator. Lightweight gateway contexts that
+    do not accept the ``override`` kwarg still receive the plugin tools.
     """
     for tool in TOOL_DEFS:
-        ctx.register_tool(
+        _register_tool(
+            ctx,
             name=tool["name"],
             toolset="web_browser",
             schema=tool["schema"],
             handler=tool["handler"],
             check_fn=check_web_browser_requirements,
             emoji=tool["emoji"],
-            override=True,
         )
     logger.info(
         "web_browser plugin registered %d tools (agent-browser binary env: %s)",

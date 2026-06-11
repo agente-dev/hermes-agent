@@ -1219,6 +1219,128 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     return {"resolved": resolved, "choice": choice}
 
 
+def pre_approval_request(tool_name: str = "", reason: str = "",
+                         category: str = "", **metadata) -> dict:
+    """Request explicit operator approval for a named non-shell tool action.
+
+    This is the approval surface used by plugins that need a first-use prompt
+    even when no shell command matches ``DANGEROUS_PATTERNS``.
+    """
+    tool_name = str(tool_name or metadata.get("tool_name") or "tool")
+    category = str(category or metadata.get("category") or "tool")
+    pattern_key = f"tool:{category}:{tool_name}"
+    description = reason or f"{tool_name} requested operator approval."
+    session_key = get_current_session_key()
+
+    if is_approved(session_key, pattern_key):
+        return {"approved": True, "cached": True, "pattern_key": pattern_key}
+
+    approval_mode = _get_approval_mode()
+    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+        approve_session(session_key, pattern_key)
+        return {"approved": True, "message": None, "pattern_key": pattern_key}
+
+    is_cli = env_var_enabled("HERMES_INTERACTIVE")
+    is_gateway = _is_gateway_approval_context()
+    is_ask = env_var_enabled("HERMES_EXEC_ASK")
+
+    if not is_cli and not is_gateway and not is_ask:
+        return {
+            "approved": True,
+            "no_interactive_approver": True,
+            "pattern_key": pattern_key,
+        }
+
+    command = tool_name
+    if is_gateway or is_ask:
+        with _lock:
+            notify_cb = _gateway_notify_cbs.get(session_key)
+
+        approval_data = {
+            "command": command,
+            "pattern_key": pattern_key,
+            "pattern_keys": [pattern_key],
+            "description": description,
+            "tool_name": tool_name,
+            "category": category,
+            "metadata": metadata,
+        }
+        if notify_cb is not None:
+            decision = _await_gateway_decision(
+                session_key, notify_cb, approval_data, surface="tool"
+            )
+            if decision.get("notify_failed"):
+                return {
+                    "approved": False,
+                    "message": "BLOCKED: Failed to send approval request to user. Do NOT retry.",
+                    "pattern_key": pattern_key,
+                    "description": description,
+                }
+
+            choice = decision.get("choice")
+            if not decision.get("resolved") or choice is None or choice == "deny":
+                outcome = "timeout" if not decision.get("resolved") else "denied"
+                return {
+                    "approved": False,
+                    "message": (
+                        "BLOCKED: Tool approval "
+                        f"{'timed out' if outcome == 'timeout' else 'was denied'}. "
+                        "Do NOT retry this tool call without operator consent."
+                    ),
+                    "pattern_key": pattern_key,
+                    "description": description,
+                    "outcome": outcome,
+                    "user_consent": False,
+                }
+
+            if choice in {"session", "always"}:
+                approve_session(session_key, pattern_key)
+            if choice == "always":
+                approve_permanent(pattern_key)
+                save_permanent_allowlist(_permanent_approved)
+            return {
+                "approved": True,
+                "message": None,
+                "user_approved": True,
+                "pattern_key": pattern_key,
+                "description": description,
+            }
+
+        submit_pending(session_key, {
+            "command": command,
+            "pattern_key": pattern_key,
+            "pattern_keys": [pattern_key],
+            "description": description,
+        })
+        return {
+            "approved": False,
+            "pattern_key": pattern_key,
+            "status": "pending_approval",
+            "message": "Approval required. User must approve before this tool can run.",
+        }
+
+    choice = prompt_dangerous_approval(command, description, allow_permanent=True)
+    if choice == "deny":
+        return {
+            "approved": False,
+            "message": "BLOCKED: User denied this tool approval request. Do NOT retry.",
+            "pattern_key": pattern_key,
+            "description": description,
+        }
+    if choice in {"session", "always"}:
+        approve_session(session_key, pattern_key)
+    if choice == "always":
+        approve_permanent(pattern_key)
+        save_permanent_allowlist(_permanent_approved)
+    return {
+        "approved": True,
+        "message": None,
+        "user_approved": True,
+        "pattern_key": pattern_key,
+        "description": description,
+    }
+
+
 def check_all_command_guards(command: str, env_type: str,
                              approval_callback=None) -> dict:
     """Run all pre-exec security checks and return a single approval decision.
