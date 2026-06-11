@@ -52,7 +52,7 @@ CREATE_CALENDAR_EVENT_SCHEMA: Dict[str, Any] = {
     "name": "create_calendar_event",
     "description": (
         "Create a new Google Calendar event. Shells "
-        "`gws calendar events insert --params '{\"calendarId\":...}' --body '{\"summary\":...,...}'` and returns the "
+        "`gws calendar events insert --params '{\"calendarId\":...}' --json '{\"summary\":...,...}'` and returns the "
         "created event id + html link. Hebrew/RTL titles are preserved verbatim."
     ),
     "label_he": "יצירת אירוע ביומן",
