@@ -429,6 +429,17 @@ def test_get_platform_tools_no_mcp_sentinel_does_not_affect_other_platforms():
     assert "exa" in cli_enabled
 
 
+def test_get_platform_tools_api_server_recovers_workflows_toolset():
+    """api_server must expose workflow composition tools without config edits."""
+    enabled = _get_platform_tools(
+        {"platform_toolsets": {"api_server": ["agente-desktop"]}},
+        "api_server",
+        include_default_mcp_servers=False,
+    )
+
+    assert "workflows" in enabled
+
+
 def test_toolset_has_keys_for_vision_accepts_codex_auth(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / "auth.json").write_text(
@@ -1550,5 +1561,4 @@ def test_real_configurable_changes_still_reported_in_diff():
     # User adds 'vision' (configurable) — must still report as added.
     new_enabled2 = (current - {"kanban"}) | {"vision"}
     assert ((new_enabled2 - current) & universe) == {"vision"}
-
 

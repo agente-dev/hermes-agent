@@ -55,8 +55,6 @@ _TOOL_EMOJIS: dict[str, str] = {
     "start_workflow_run": "▶️",
     "get_run_status": "📊",
     "resume_paused_run": "⏯️",
-    # hermes-202606-002 additions
-    "save_workflow_rule": "📝",
     "evaluate_triage_rules": "🧭",
 }
 
@@ -179,7 +177,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "save_triage_instructions": {
         "name": "save_triage_instructions",
         "description": (
-            "(DEPRECATED — use save_workflow_rule for new rules.) "
+            "(DEPRECATED — use save_workflow + create_routine for new rules.) "
             "Saves free-text operator triage instructions to the workspace "
             "settings. Hermes will read these instructions at the start of "
             "every session to personalize its behavior. Retained for "
@@ -530,100 +528,6 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 },
             },
             "required": ["runId", "stepIndex"],
-        },
-    },
-    # ── hermes-202606-002: workflow-rule + triage parity (desktop-202606-437) ──
-    "save_workflow_rule": {
-        "name": "save_workflow_rule",
-        "description": (
-            "Saves a structured workflow rule that gates inbound event "
-            "processing. Rules match against connector events and trigger "
-            "actions like ticket creation. Returns the created rule id and "
-            "timestamp. The legacy save_triage_instructions tool still works "
-            "for backwards-compat; prefer this tool for new rules."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "match_pattern": {
-                    "type": "object",
-                    "description": (
-                        "Matching criteria for inbound connector events. "
-                        "Required fields: source (connector id). Optional "
-                        "filters: event_type, text_contains, metadata_match."
-                    ),
-                    "properties": {
-                        "source": {
-                            "type": "string",
-                            "description": (
-                                "Connector id the rule applies to "
-                                '(e.g. "whatsapp", "local-folder").'
-                            ),
-                        },
-                        "filters": {
-                            "type": "object",
-                            "description": (
-                                "Optional narrow filters applied after the "
-                                "connector match."
-                            ),
-                            "properties": {
-                                "event_type": {
-                                    "type": "string",
-                                    "description": "Exact event type to match.",
-                                },
-                                "text_contains": {
-                                    "type": "string",
-                                    "description": (
-                                        "Case-insensitive substring to look "
-                                        "for in the event text payload."
-                                    ),
-                                },
-                                "metadata_match": {
-                                    "type": "object",
-                                    "description": (
-                                        "Exact key-value pairs the event "
-                                        "metadata must satisfy."
-                                    ),
-                                    "additionalProperties": True,
-                                },
-                            },
-                            "additionalProperties": False,
-                        },
-                    },
-                    "required": ["source"],
-                    "additionalProperties": False,
-                },
-                "action": {
-                    "type": "string",
-                    "description": (
-                        "The action to take when the rule matches "
-                        '(e.g. "create_ticket").'
-                    ),
-                },
-                "target": {
-                    "type": "object",
-                    "description": (
-                        "Optional per-action target payload (e.g. ticket "
-                        "template defaults)."
-                    ),
-                    "additionalProperties": True,
-                },
-                "description": {
-                    "type": "string",
-                    "description": (
-                        "Human-readable rule description for audit and "
-                        "list-tools surfaces."
-                    ),
-                },
-                "enabled": {
-                    "type": "boolean",
-                    "description": (
-                        "Whether the rule is active. Defaults to true."
-                    ),
-                },
-            },
-            "required": ["match_pattern", "action", "description"],
-            "additionalProperties": False,
         },
     },
     "evaluate_triage_rules": {

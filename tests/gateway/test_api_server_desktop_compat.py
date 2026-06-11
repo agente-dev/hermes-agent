@@ -24,12 +24,12 @@ from gateway.agente_desktop_adapter.tool_discovery import TOOL_SCHEMAS, _proxy_c
 
 
 def test_tool_discovery_shape():
-    # Basic shape from the moved schemas (21 tools post 202606-002).
+    # Basic shape from the moved schemas.
     assert isinstance(TOOL_SCHEMAS, dict)
-    assert len(TOOL_SCHEMAS) == 21
+    assert len(TOOL_SCHEMAS) == 20
     assert "list_whatsapp_accounts" in TOOL_SCHEMAS
     assert "evaluate_triage_rules" in TOOL_SCHEMAS
-    assert "save_workflow_rule" in TOOL_SCHEMAS
+    assert "save_workflow_rule" not in TOOL_SCHEMAS
     assert "save_triage_instructions" in TOOL_SCHEMAS  # deprecated but present for back-compat
     for name, sch in TOOL_SCHEMAS.items():
         assert sch.get("name") == name
@@ -106,7 +106,7 @@ def test_create_ticket_schema():
 
 def test_whatsapp_triage_ticket():
     # WhatsApp + ticket + triage tools are all present via the bridge
-    for name in ("list_whatsapp_accounts", "create_ticket", "evaluate_triage_rules", "save_workflow_rule"):
+    for name in ("list_whatsapp_accounts", "create_ticket", "evaluate_triage_rules"):
         assert name in TOOL_SCHEMAS
     # The integration module registers (delegates)
     whatsapp_ticket_integration.register(None, None)
@@ -273,27 +273,17 @@ def test_evaluate_triage_rules_schema_present():
     assert props["metadata"]["type"] == "object"
 
 
-def test_save_workflow_rule_schema_present():
-    schema = TOOL_SCHEMAS.get("save_workflow_rule")
-    assert schema is not None, "save_workflow_rule missing"
-    assert schema["name"] == "save_workflow_rule"
-    params = schema["parameters"]
-    assert params["type"] == "object"
-    assert set(params["required"]) == {"match_pattern", "action", "description"}
-    mp = params["properties"]["match_pattern"]
-    assert mp["type"] == "object"
-    assert set(mp["required"]) == {"source"}
-    filters_props = mp["properties"]["filters"]["properties"]
-    for key in ("event_type", "text_contains", "metadata_match"):
-        assert key in filters_props
+def test_save_workflow_rule_schema_absent():
+    assert "save_workflow_rule" not in TOOL_SCHEMAS
+    assert "save_workflow_rule" not in tool_discovery._TOOL_EMOJIS
 
 
 def test_save_triage_instructions_still_registered_as_deprecated():
     schema = TOOL_SCHEMAS.get("save_triage_instructions")
     assert schema is not None, "save_triage_instructions should remain for back-compat"
     assert "DEPRECATED" in schema["description"]
+    assert "save_workflow + create_routine" in schema["description"]
 
 
 def test_total_tool_count_matches():
-    # 21 after hermes-202606-002 intake
-    assert len(TOOL_SCHEMAS) == 21
+    assert len(TOOL_SCHEMAS) == 20
