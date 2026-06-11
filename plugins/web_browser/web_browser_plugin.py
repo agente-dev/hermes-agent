@@ -22,6 +22,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 from typing import Any, Dict, List, Optional
 
 from plugins.web_browser.schemas import (
@@ -46,6 +47,9 @@ logger = logging.getLogger(__name__)
 AGENT_BROWSER_BIN_ENV = "AGENT_BROWSER_BIN"
 DEFAULT_BINARY = "agent-browser"
 DEFAULT_TIMEOUT_SECONDS = 90
+_NAVIGATION_APPROVAL_LOCK = threading.Lock()
+_NAVIGATION_APPROVED_SESSIONS: set[str] = set()
+_REDACTED = "[redacted]"
 
 
 def _resolve_binary() -> Optional[str]:
@@ -68,6 +72,11 @@ def _resolve_binary() -> Optional[str]:
 def check_web_browser_requirements() -> bool:
     """Return True when the agent-browser CLI is installed and runnable."""
     return _resolve_binary() is not None
+
+
+def _reset_navigation_approval_for_tests() -> None:  # pragma: no cover - test helper
+    with _NAVIGATION_APPROVAL_LOCK:
+        _NAVIGATION_APPROVED_SESSIONS.clear()
 
 
 # -----------------------------------------------------------------------------
@@ -105,9 +114,95 @@ def _request_approval(command: str, description: str) -> Dict[str, Any]:
     return check_dangerous_command(command, env_type="local")
 
 
+def _current_session_key() -> str:
+    try:
+        from tools.approval import get_current_session_key
+
+        return get_current_session_key(default="default") or "default"
+    except Exception:
+        return os.environ.get("HERMES_SESSION_KEY", "default") or "default"
+
+
+def _request_first_navigation_approval(url: str, task: str = "") -> Dict[str, Any]:
+    """Ask once per approval session before the browser may navigate."""
+    session_key = _current_session_key()
+    with _NAVIGATION_APPROVAL_LOCK:
+        if session_key in _NAVIGATION_APPROVED_SESSIONS:
+            return {"approved": True, "cached": True}
+
+    reason = (
+        f"agent-browser will open {url} in a real browser. "
+        + (f"Task: {task}. " if task else "")
+        + "First browser navigation in this session requires operator approval."
+    )
+    try:
+        from tools.approval import pre_approval_request
+    except Exception as exc:
+        logger.warning(
+            "web_browser: tools.approval.pre_approval_request unavailable (%s); "
+            "falling back to dangerous-command gate",
+            exc,
+        )
+        approval = _request_approval(f"browse {url}", reason)
+    else:
+        try:
+            approval = pre_approval_request(
+                tool_name="browser_navigate",
+                reason=reason,
+                category="web",
+                target=url,
+            )
+        except TypeError:
+            approval = pre_approval_request("browser_navigate")
+
+    approved = bool(approval) if not isinstance(approval, dict) else bool(approval.get("approved", True))
+    if approved:
+        with _NAVIGATION_APPROVAL_LOCK:
+            _NAVIGATION_APPROVED_SESSIONS.add(session_key)
+    return {"approved": approved, "raw": approval}
+
+
 # -----------------------------------------------------------------------------
 # Subprocess plumbing
 # -----------------------------------------------------------------------------
+
+
+def _redact_argv(argv: List[str]) -> List[str]:
+    redacted: List[str] = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            redacted.append(_REDACTED)
+            skip_next = False
+            continue
+        redacted.append(arg)
+        if arg in {"--basic-auth", "--headers", "--proxy"}:
+            skip_next = True
+    return redacted
+
+
+def _redact_strings(value: Any, secrets: List[str]) -> Any:
+    if isinstance(value, str):
+        redacted = value
+        for secret in secrets:
+            if secret:
+                redacted = redacted.replace(secret, _REDACTED)
+        return redacted
+    if isinstance(value, dict):
+        return {key: _redact_strings(inner, secrets) for key, inner in value.items()}
+    if isinstance(value, list):
+        return [_redact_strings(inner, secrets) for inner in value]
+    return value
+
+
+def _extract_content(result: Dict[str, Any]) -> str:
+    for key in ("content", "snapshot", "text", "output", "stdout", "result"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+    return ""
 
 
 def _run_agent_browser(argv: List[str], *, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> Dict[str, Any]:
@@ -145,7 +240,7 @@ def _run_agent_browser(argv: List[str], *, timeout: int = DEFAULT_TIMEOUT_SECOND
         return {
             "success": False,
             "error": f"agent-browser timed out after {timeout}s",
-            "argv": full_argv,
+            "argv": _redact_argv(full_argv),
         }
     except OSError as exc:
         return {"success": False, "error": f"agent-browser exec failed: {exc}"}
@@ -178,6 +273,23 @@ def _run_agent_browser(argv: List[str], *, timeout: int = DEFAULT_TIMEOUT_SECOND
     return {"success": True, "output": "", "stderr": stderr}
 
 
+def _navigate_and_read(argv: List[str], *, secrets: List[str]) -> Dict[str, Any]:
+    opened = _run_agent_browser(argv)
+    if not opened.get("success", False):
+        return _redact_strings(opened, secrets)
+
+    snapshot = _run_agent_browser(["snapshot", "-c"])
+    result = dict(opened)
+    if snapshot.get("success", False):
+        content = _extract_content(snapshot)
+        result["snapshot"] = content
+        result["content"] = content
+        result["snapshot_result"] = snapshot
+    else:
+        result["snapshot_error"] = snapshot
+    return _redact_strings(result, secrets)
+
+
 # -----------------------------------------------------------------------------
 # Handlers
 # -----------------------------------------------------------------------------
@@ -191,12 +303,7 @@ def handle_browser_navigate(args: Dict[str, Any], **_kw) -> str:
     task = (args.get("task") or "").strip()
     basic_auth = (args.get("basic_auth") or "").strip()
 
-    description = (
-        f"agent-browser will open {url} in a real (possibly headless) browser. "
-        + (f"Task: {task}. " if task else "")
-        + "This may load arbitrary remote content."
-    )
-    approval = _request_approval(f"browse {url}", description)
+    approval = _request_first_navigation_approval(url, task)
     if not approval.get("approved", False):
         return json.dumps({
             "success": False,
@@ -209,7 +316,7 @@ def handle_browser_navigate(args: Dict[str, Any], **_kw) -> str:
         argv.extend(["--task", task])
     if basic_auth:
         argv.extend(["--basic-auth", basic_auth])
-    return json.dumps(_run_agent_browser(argv), ensure_ascii=False)
+    return json.dumps(_navigate_and_read(argv, secrets=[basic_auth]), ensure_ascii=False)
 
 
 def handle_browser_screenshot(args: Dict[str, Any], **_kw) -> str:
@@ -223,10 +330,10 @@ def handle_browser_screenshot(args: Dict[str, Any], **_kw) -> str:
         return json.dumps({"success": False, "error": "approval denied", "approval": approval})
 
     argv: List[str] = ["screenshot"]
+    if selector:
+        argv.append(selector)
     if path:
         argv.append(path)
-    if selector:
-        argv.extend(["--selector", selector])
     return json.dumps(_run_agent_browser(argv), ensure_ascii=False)
 
 
@@ -316,30 +423,50 @@ def handle_browser_get(args: Dict[str, Any], **_kw) -> str:
     if not approval.get("approved", False):
         return json.dumps({"success": False, "error": "approval denied", "approval": approval})
     argv: List[str] = ["get", what]
-    if what == "attr" and attr:
-        argv.append(attr)
-    if selector:
+    selector_required = {"text", "html", "value", "count", "box", "styles"}
+    if what == "attr":
+        if not selector:
+            return json.dumps({"success": False, "error": "selector is required for attr"})
+        if not attr:
+            return json.dumps({"success": False, "error": "attr is required for attr"})
+        argv.extend([selector, attr])
+    elif what in selector_required:
+        if not selector:
+            return json.dumps({"success": False, "error": f"selector is required for {what}"})
         argv.append(selector)
+    elif what in {"title", "url"}:
+        pass
+    else:
+        return json.dumps({"success": False, "error": f"unsupported get target: {what}"})
     return json.dumps(_run_agent_browser(argv), ensure_ascii=False)
 
 
 def handle_browser_find(args: Dict[str, Any], **_kw) -> str:
     locator = (args.get("locator") or "").strip()
     value = (args.get("value") or "").strip()
+    selector = (args.get("selector") or "").strip()
     if not locator:
         return json.dumps({"success": False, "error": "locator is required"})
     if not value:
         return json.dumps({"success": False, "error": "value is required"})
-    action = (args.get("action") or "get-text").strip()
+    if locator == "nth" and not selector:
+        return json.dumps({"success": False, "error": "selector is required for nth"})
+    action = (args.get("action") or "click").strip()
     text = args.get("text")
+    supported_actions = {"click", "fill", "type", "hover", "focus", "check", "uncheck"}
+    if action not in supported_actions:
+        return json.dumps({"success": False, "error": f"unsupported find action: {action}"})
     approval = _request_approval(
         f"browse find {locator}={value}",
         f"agent-browser will locate an element via {locator}={value} and {action}.",
     )
     if not approval.get("approved", False):
         return json.dumps({"success": False, "error": "approval denied", "approval": approval})
-    argv: List[str] = ["find", locator, value, action]
-    if text is not None and action in {"type", "fill", "press"}:
+    if locator == "nth":
+        argv: List[str] = ["find", locator, value, selector, action]
+    else:
+        argv = ["find", locator, value, action]
+    if text is not None and action in {"type", "fill"}:
         argv.append(str(text))
     return json.dumps(_run_agent_browser(argv), ensure_ascii=False)
 

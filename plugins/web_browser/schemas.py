@@ -157,7 +157,8 @@ BROWSER_GET_SCHEMA = _tool(
     "browser_get",
     "חילוץ מידע",
     "Extract data from the page — supported fields: text, html, value, title, "
-    "url, count, box, styles, attr. Wraps `agent-browser get <what> [selector]`.",
+    "url, count, box, styles, attr. Wraps `agent-browser get <what> [selector]` "
+    "or `agent-browser get attr <selector> <name>`.",
     {
         "type": "object",
         "properties": {
@@ -179,7 +180,8 @@ BROWSER_FIND_SCHEMA = _tool(
     "חיפוש אלמנט",
     "Find an element by role / text / label / placeholder / alt / title / testid "
     "and optionally act on it. Wraps `agent-browser find <locator> <value> "
-    "<action> [text]`.",
+    "<action> [text]`; for locator=nth, wraps "
+    "`agent-browser find nth <index> <selector> <action> [text]`.",
     {
         "type": "object",
         "properties": {
@@ -189,12 +191,13 @@ BROWSER_FIND_SCHEMA = _tool(
                 "description": "Locator strategy.",
             },
             "value": {"type": "string", "description": "Locator value (e.g. role name, text content, testid)."},
+            "selector": {"type": "string", "description": "Only used when locator='nth' — selector to index into."},
             "action": {
                 "type": "string",
-                "enum": ["click", "type", "fill", "press", "get-text", "exists"],
-                "description": "What to do with the matched element. Default: get-text.",
+                "enum": ["click", "type", "fill", "hover", "focus", "check", "uncheck"],
+                "description": "What to do with the matched element. Default: click.",
             },
-            "text": {"type": "string", "description": "Extra arg for action=type/fill/press."},
+            "text": {"type": "string", "description": "Extra arg for action=type/fill."},
         },
         "required": ["locator", "value"],
         "additionalProperties": False,
