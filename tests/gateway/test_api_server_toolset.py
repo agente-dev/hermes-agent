@@ -28,6 +28,7 @@ class TestHermesApiServerToolset:
             "vision_analyze", "image_generate",
             "execute_code", "delegate_task",
             "todo", "memory", "session_search", "cronjob",
+            "save_workflow", "create_routine",
         ]
         for tool in expected:
             assert tool in tools, f"Missing expected tool: {tool}"
@@ -112,7 +113,8 @@ class TestApiServerAdapterToolset:
                                         "provider": None, "api_mode": None,
                                         "command": None, "args": []}
             mock_model.return_value = "test/model"
-            # User overrides with just web and terminal
+            # User overrides with web and terminal. Non-configurable platform
+            # toolsets whose tools are in hermes-api-server are still recovered.
             mock_config.return_value = {
                 "platform_toolsets": {"api_server": ["web", "terminal"]}
             }
@@ -123,4 +125,4 @@ class TestApiServerAdapterToolset:
             mock_agent_cls.assert_called_once()
             call_kwargs = mock_agent_cls.call_args
             toolsets = call_kwargs.kwargs.get("enabled_toolsets")
-            assert sorted(toolsets) == ["drive", "email", "terminal", "web"]
+            assert sorted(toolsets) == ["drive", "email", "terminal", "web", "workflows"]
