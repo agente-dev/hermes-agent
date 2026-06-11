@@ -153,7 +153,7 @@ def _request_first_navigation_approval(url: str, task: str = "") -> Dict[str, An
                 target=url,
             )
         except TypeError:
-            approval = pre_approval_request("browser_navigate")  # type: ignore[misc]
+            approval = pre_approval_request("browser_navigate")
 
     approved = bool(approval) if not isinstance(approval, dict) else bool(approval.get("approved", True))
     if approved:
