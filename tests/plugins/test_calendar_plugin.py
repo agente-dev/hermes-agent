@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -35,10 +36,10 @@ _STUB_SCRIPT = textwrap.dedent(
         echo '[{"id":"evt1","start":"2026-06-02T09:00:00Z","end":"2026-06-02T10:00:00Z","title":"פגישה עם לקוח"}]'
         ;;
       insert)
-        # Parse --body JSON for the summary (Hebrew/RTL passthrough test).
+        # Parse --json body for the summary (Hebrew/RTL passthrough test).
         body_json=""
         while [ "$#" -gt 0 ]; do
-          if [ "$1" = "--body" ]; then body_json="$2"; shift 2; else shift; fi
+          if [ "$1" = "--json" ]; then body_json="$2"; shift 2; else shift; fi
         done
         title="$(printf '%s' "$body_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("summary",""))' 2>/dev/null)"
         printf '{"id":"new-evt","htmlLink":"https://calendar.google.com/event?eid=x","summary":%s}\\n' "$(printf '%s' "$title" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')"
@@ -96,8 +97,28 @@ def test_create_calendar_event_preserves_hebrew_title(fake_gws: Path) -> None:
     )
     assert event["id"] == "new-evt"
     # The stub echoes the summary verbatim — proves the Hebrew title round-trips
-    # through --body JSON → stdout JSON → json.loads.
+    # through --json payload → stdout JSON → json.loads.
     assert event["summary"] == "ישיבה עם רואה החשבון"
+
+
+def test_raw_calendar_body_calls_use_json_flag_not_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001, ANN003
+        calls.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout='{"ok": true}', stderr="")
+
+    monkeypatch.setenv("AGENTE_GWS_BIN", "/fake/bin/gws")
+    monkeypatch.setattr(cp.subprocess, "run", fake_run)
+
+    cp.create_calendar_event(title="x", start="2026-06-02T14:00:00Z", end="2026-06-02T15:00:00Z")
+    cp.update_calendar_event(event_id="evt1", title="updated")
+
+    assert calls
+    for argv in calls:
+        assert "--json" in argv
+        assert "--body" not in argv
+        assert json.loads(argv[argv.index("--json") + 1])
 
 
 def test_get_calendar_event(fake_gws: Path) -> None:

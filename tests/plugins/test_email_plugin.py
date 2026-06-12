@@ -80,6 +80,12 @@ def _completed(stdout: str, returncode: int = 0, stderr: str = "") -> subprocess
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+def _raw_json_payload(argv: list[str]) -> dict:
+    assert "--json" in argv
+    assert "--body" not in argv
+    return json.loads(argv[argv.index("--json") + 1])
+
+
 class TestListEmails:
     def test_shells_expected_argv(self, email_plugin):
         payload = {"messages": [{"id": "abc", "subject": "Hi"}]}
@@ -133,8 +139,7 @@ class TestDraftReply:
         assert "--params" in argv
         params = json.loads(argv[argv.index("--params") + 1])
         assert params["userId"] == "me"
-        assert "--body" in argv
-        body = json.loads(argv[argv.index("--body") + 1])
+        body = _raw_json_payload(argv)
         assert body["message"]["threadId"] == "m1"
         raw = base64.urlsafe_b64decode(body["message"]["raw"].encode())
         msg = message_from_bytes(raw)
@@ -153,8 +158,7 @@ class TestSendEmail:
         assert "--params" in argv
         params = json.loads(argv[argv.index("--params") + 1])
         assert params["userId"] == "me"
-        assert "--body" in argv
-        message_body = json.loads(argv[argv.index("--body") + 1])
+        message_body = _raw_json_payload(argv)
         assert "raw" in message_body
 
 
@@ -164,23 +168,51 @@ class TestMarkEmail:
             email_plugin.mark_email(message_id="m1", add_label="UNREAD")
         argv = run.call_args[0][0]
         assert argv[1:5] == ["gmail", "users", "messages", "modify"]
-        body = json.loads(argv[argv.index("--body") + 1])
+        body = _raw_json_payload(argv)
         assert body["addLabelIds"] == ["UNREAD"]
 
     def test_remove_label(self, email_plugin):
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("{}")) as run:
             email_plugin.mark_email(message_id="m1", remove_label="UNREAD")
         argv = run.call_args[0][0]
-        body = json.loads(argv[argv.index("--body") + 1])
+        body = _raw_json_payload(argv)
         assert body["removeLabelIds"] == ["UNREAD"]
 
     def test_label_delta_matches_registered_tool_schema(self, email_plugin):
         with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("{}")) as run:
             email_plugin.mark_email(message_id="m1", add_label="STARRED", remove_label="INBOX")
         argv = run.call_args[0][0]
-        body = json.loads(argv[argv.index("--body") + 1])
+        body = _raw_json_payload(argv)
         assert body["addLabelIds"] == ["STARRED"]
         assert body["removeLabelIds"] == ["INBOX"]
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        lambda mod: mod.draft_reply(message_id="m1", body="thanks"),
+        lambda mod: mod.send_email(to="a@b.co", subject="s", body="b"),
+        lambda mod: mod.mark_email(message_id="m1", add_label="UNREAD"),
+        lambda mod: mod.draft_email(to="a@b.co", subject="s", body="b"),
+        lambda mod: mod.send_draft(draft_id="d1"),
+        lambda mod: mod.apply_label(message_id="m1", add_labels=["STARRED"]),
+        lambda mod: mod.batch_modify(message_ids=["m1"], remove_labels=["INBOX"]),
+    ],
+)
+def test_raw_gmail_body_calls_use_json_flag_not_body(email_plugin, invoke) -> None:
+    with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("{}")) as run:
+        invoke(email_plugin)
+    argv = run.call_args[0][0]
+    _raw_json_payload(argv)
+
+
+def test_gmail_helper_reply_calls_keep_body_flag(email_plugin) -> None:
+    with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("{}")) as run:
+        email_plugin.reply_email(message_id="m1", body="thanks")
+    argv = run.call_args[0][0]
+    assert argv[1:3] == ["gmail", "+reply"]
+    assert "--body" in argv
+    assert "--json" not in argv
 
 
 class TestErrorPropagation:

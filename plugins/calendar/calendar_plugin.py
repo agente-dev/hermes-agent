@@ -161,7 +161,7 @@ def create_calendar_event(
     res = _gws_json([
         "calendar", "events", "insert",
         "--params", json.dumps(params),
-        "--body", json.dumps(body),
+        "--json", json.dumps(body),
     ])
     return res if isinstance(res, dict) else {"event": res}
 
@@ -269,7 +269,7 @@ def update_calendar_event(
     res = _gws_json([
         "calendar", "events", "patch",
         "--params", json.dumps(params),
-        "--body", json.dumps(body),
+        "--json", json.dumps(body),
     ])
     return res if isinstance(res, dict) else {"event": res}
 

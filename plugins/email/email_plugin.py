@@ -111,7 +111,7 @@ def draft_reply(message_id: str, body: str) -> dict:
         },
     )
     draft_body = {"message": {"threadId": message_id, "raw": raw}}
-    return _gws_json(["gmail", "users", "drafts", "create", "--params", json.dumps(params), "--body", json.dumps(draft_body)])
+    return _gws_json(["gmail", "users", "drafts", "create", "--params", json.dumps(params), "--json", json.dumps(draft_body)])
 
 
 def send_email(to: str, subject: str, body: str) -> dict:
@@ -119,7 +119,7 @@ def send_email(to: str, subject: str, body: str) -> dict:
     raw = _encode_text_message(body, {"to": to, "subject": subject})
     params = {"userId": "me"}
     message_body = {"raw": raw}
-    return _gws_json(["gmail", "users", "messages", "send", "--params", json.dumps(params), "--body", json.dumps(message_body)])
+    return _gws_json(["gmail", "users", "messages", "send", "--params", json.dumps(params), "--json", json.dumps(message_body)])
 
 
 def mark_email(message_id: str, add_label: str | None = None, remove_label: str | None = None) -> dict:
@@ -130,7 +130,7 @@ def mark_email(message_id: str, add_label: str | None = None, remove_label: str 
         body["addLabelIds"] = [add_label]
     if remove_label:
         body["removeLabelIds"] = [remove_label]
-    return _gws_json(["gmail", "users", "messages", "modify", "--params", json.dumps(params), "--body", json.dumps(body)])
+    return _gws_json(["gmail", "users", "messages", "modify", "--params", json.dumps(params), "--json", json.dumps(body)])
 
 
 def search_emails(query: str, folder: str = "INBOX", max_results: int = 20, page_token: str | None = None) -> dict:
@@ -210,14 +210,14 @@ def draft_email(to: str, subject: str, body: str) -> dict:
     params = {"userId": "me"}
     raw = _encode_text_message(body, {"to": to, "subject": subject})
     draft_body = {"message": {"raw": raw}}
-    return _gws_json(["gmail", "users", "drafts", "create", "--params", json.dumps(params), "--body", json.dumps(draft_body)])
+    return _gws_json(["gmail", "users", "drafts", "create", "--params", json.dumps(params), "--json", json.dumps(draft_body)])
 
 
 def send_draft(draft_id: str) -> dict:
     """Send an existing draft by its ID."""
     params = {"userId": "me"}
     send_body = {"id": draft_id}
-    return _gws_json(["gmail", "users", "drafts", "send", "--params", json.dumps(params), "--body", json.dumps(send_body)])
+    return _gws_json(["gmail", "users", "drafts", "send", "--params", json.dumps(params), "--json", json.dumps(send_body)])
 
 
 def list_labels() -> dict:
@@ -233,7 +233,7 @@ def apply_label(message_id: str, add_labels: list[str] | None = None, remove_lab
         body["addLabelIds"] = add_labels
     if remove_labels:
         body["removeLabelIds"] = remove_labels
-    return _gws_json(["gmail", "users", "messages", "modify", "--params", json.dumps(params), "--body", json.dumps(body)])
+    return _gws_json(["gmail", "users", "messages", "modify", "--params", json.dumps(params), "--json", json.dumps(body)])
 
 
 def trash_email(message_id: str) -> dict:
@@ -249,7 +249,7 @@ def batch_modify(message_ids: list[str], add_labels: list[str] | None = None, re
         body["addLabelIds"] = add_labels
     if remove_labels:
         body["removeLabelIds"] = remove_labels
-    return _gws_json(["gmail", "users", "messages", "batchModify", "--params", json.dumps({"userId": "me"}), "--body", json.dumps(body)])
+    return _gws_json(["gmail", "users", "messages", "batchModify", "--params", json.dumps({"userId": "me"}), "--json", json.dumps(body)])
 
 
 def mark_read(message_id: str) -> dict:
