@@ -22,13 +22,66 @@ from gateway.agente_desktop_adapter import (
 )
 from gateway.agente_desktop_adapter.tool_discovery import TOOL_SCHEMAS, _proxy_call, _check_available, _make_handler
 
+EXPECTED_DESKTOP_IPC_TOOL_NAMES = {
+    "data_read",
+    "data_write",
+    "list_whatsapp_accounts",
+    "list_recent_messages",
+    "create_ticket",
+    "move_ticket",
+    "assign_ticket",
+    "list_tickets",
+    "save_triage_instructions",
+    "evaluate_triage_rules",
+    "request_approval",
+    "get_office_context",
+    "update_office_context",
+    "list_tools",
+    "list_workflows",
+    "inspect_workflow",
+    "start_workflow_run",
+    "get_run_status",
+    "resume_paused_run",
+    "save_executable_workflow",
+    "query_client",
+    "upsert_client",
+    "resolve_or_upsert_client",
+    "link_ticket_to_client",
+    "link_document_to_client",
+    "read_file",
+    "read_document",
+    "write_file",
+    "list_directory",
+    "scan_folder",
+    "list_web_connectors",
+    "browse_connector",
+    "list_routines",
+    "get_routine",
+    "run_routine",
+    "pause_routine",
+    "resume_routine",
+    "delete_routine",
+    "suggest_client_tip",
+    "connect_google",
+    "connect_anthropic",
+    "connect_openai",
+    "check_connector_status",
+    "download_whatsapp_media",
+    "list_agent_profiles",
+    "create_agent_profile",
+}
+
 
 def test_tool_discovery_shape():
     # Basic shape from the moved schemas.
     assert isinstance(TOOL_SCHEMAS, dict)
-    assert len(TOOL_SCHEMAS) == 20
+    assert set(TOOL_SCHEMAS) == EXPECTED_DESKTOP_IPC_TOOL_NAMES
     assert "list_whatsapp_accounts" in TOOL_SCHEMAS
+    assert "download_whatsapp_media" in TOOL_SCHEMAS
+    assert "read_document" in TOOL_SCHEMAS
     assert "evaluate_triage_rules" in TOOL_SCHEMAS
+    assert "create_routine" not in TOOL_SCHEMAS
+    assert "save_workflow" not in TOOL_SCHEMAS
     assert "save_workflow_rule" not in TOOL_SCHEMAS
     assert "save_triage_instructions" in TOOL_SCHEMAS  # deprecated but present for back-compat
     for name, sch in TOOL_SCHEMAS.items():
@@ -273,6 +326,38 @@ def test_evaluate_triage_rules_schema_present():
     assert props["metadata"]["type"] == "object"
 
 
+def test_download_whatsapp_media_schema_requires_chat_jid():
+    schema = TOOL_SCHEMAS.get("download_whatsapp_media")
+    assert schema is not None, "download_whatsapp_media missing"
+    assert schema["name"] == "download_whatsapp_media"
+    params = schema["parameters"]
+    assert params["required"] == [
+        "account_id",
+        "message_id",
+        "chat_jid",
+        "media_type",
+        "dest_path",
+    ]
+    assert params["additionalProperties"] is False
+    props = params["properties"]
+    assert set(props) == {"account_id", "message_id", "chat_jid", "media_type", "dest_path"}
+    assert "list_recent_messages" in props["chat_jid"]["description"]
+    assert "REST download endpoint" in props["chat_jid"]["description"]
+
+
+def test_read_document_schema_present_and_current():
+    schema = TOOL_SCHEMAS.get("read_document")
+    assert schema is not None, "read_document missing"
+    assert schema["name"] == "read_document"
+    params = schema["parameters"]
+    assert params["type"] == "object"
+    assert params["required"] == ["path"]
+    props = params["properties"]
+    assert {"path", "maxChars", "pageRange"} <= set(props)
+    assert props["pageRange"]["properties"]["start"]["type"] in {"integer", "number"}
+    assert props["pageRange"]["properties"]["end"]["type"] in {"integer", "number"}
+
+
 def test_save_workflow_rule_schema_absent():
     assert "save_workflow_rule" not in TOOL_SCHEMAS
     assert "save_workflow_rule" not in tool_discovery._TOOL_EMOJIS
@@ -286,4 +371,4 @@ def test_save_triage_instructions_still_registered_as_deprecated():
 
 
 def test_total_tool_count_matches():
-    assert len(TOOL_SCHEMAS) == 20
+    assert len(TOOL_SCHEMAS) == 46

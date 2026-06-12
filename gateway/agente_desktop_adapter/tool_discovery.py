@@ -56,10 +56,38 @@ _TOOL_EMOJIS: dict[str, str] = {
     "get_run_status": "📊",
     "resume_paused_run": "⏯️",
     "evaluate_triage_rules": "🧭",
+    "data_read": "📖",
+    "data_write": "✏️",
+    "assign_ticket": "👥",
+    "resolve_or_upsert_client": "🪪",
+    "read_file": "📄",
+    "read_document": "📑",
+    "write_file": "💾",
+    "list_directory": "📂",
+    "scan_folder": "🔍",
+    "list_web_connectors": "🌐",
+    "browse_connector": "🧭",
+    "list_routines": "⏱️",
+    "get_routine": "🔎",
+    "run_routine": "▶️",
+    "pause_routine": "⏸️",
+    "resume_routine": "⏯️",
+    "delete_routine": "🗑️",
+    "suggest_client_tip": "💡",
+    "download_whatsapp_media": "📥",
+    "connect_google": "🔐",
+    "connect_anthropic": "🔐",
+    "connect_openai": "🔐",
+    "check_connector_status": "✅",
+    "save_executable_workflow": "🧩",
+    "list_agent_profiles": "👥",
+    "create_agent_profile": "✳️",
 }
 
-# Schemas moved here from plugins/agente_desktop/schemas.py (exact copy for parity)
-# Mirrors electron/main/hermes-tools/*.ts in the desktop side.
+# Schemas moved here from plugins/agente_desktop/schemas.py.
+# Mirrors electron/main/hermes-tools/*.ts in the desktop side. Keep this list
+# in lockstep with agente-desktop/electron/main/hermes-tools/python-schema-parity.test.ts
+# whenever Desktop adds or changes an IPC tool schema.
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "list_whatsapp_accounts": {
         "name": "list_whatsapp_accounts",
@@ -74,11 +102,17 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "required": [],
         },
     },
+    # --- Agente Desktop list-recent-messages schema description patch (desktop-202606-515) ---
     "list_recent_messages": {
         "name": "list_recent_messages",
         "description": (
-            "Returns recent WhatsApp messages for a given account. Use this to "
-            "summarize incoming messages and decide if any need a ticket created."
+            "Returns recent WhatsApp messages for a given account. Use this "
+            "to summarize incoming messages and decide if any need a ticket "
+            "created. The result is paginated (default 25, max 100); when "
+            "has_more is true, call again with offset advanced by limit. "
+            "Each chat includes chat_jid; pass that value to "
+            "download_whatsapp_media when downloading an attachment from a "
+            "listed message."
         ),
         "parameters": {
             "type": "object",
@@ -89,28 +123,45 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of chats to return (default 5, max 10).",
-                    "default": 5,
+                    "description": "Maximum number of chats to return in this page (default 25, max 100).",
+                    "default": 25,
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Pagination offset — skip this many chats before returning the page (default 0).",
+                    "default": 0,
                 },
             },
             "required": ["account_id"],
         },
     },
+    # --- end Agente Desktop list-recent-messages schema description patch (desktop-202606-515) ---
+
+    # --- Agente Desktop create-ticket schema canonical patch (desktop-20260604-track-b) ---
     "create_ticket": {
         "name": "create_ticket",
         "description": (
-            'Creates a new ticket in the office board. Status defaults to '
-            '"חדש" (pending). Use source="whatsapp" and source_id=<message_id> '
-            "when creating from a WhatsApp message."
+            "Creates a new ticket in the office board. Status defaults to "
+            "\"חדש\" (pending). Use source=\"whatsapp\" and "
+            "source_id=<message_id> when creating from a WhatsApp message. "
+            "When a specific client/person is named, FIRST resolve them via "
+            "resolve_or_upsert_client and pass the returned slug as client_id "
+            "so the ticket appears on that client's profile."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "Ticket title (preferably in Hebrew)."},
-                "body": {"type": "string", "description": "Optional detailed description."},
+                "title": {
+                    "type": "string",
+                    "description": "Ticket title (preferably in Hebrew).",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Optional detailed description.",
+                },
                 "status": {
                     "type": "string",
-                    "description": 'Status: "חדש" (default), "בטיפול", "ממתין לאישור", "done".',
+                    "description": "Status: \"חדש\" (default), \"בטיפול\", \"ממתין לאישור\", \"done\".",
                     "default": "חדש",
                 },
                 "assignee": {
@@ -119,16 +170,26 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 },
                 "source": {
                     "type": "string",
-                    "description": 'Source of the ticket, e.g. "whatsapp" or "manual".',
+                    "description": "Source of the ticket, e.g. \"whatsapp\" or \"manual\".",
                 },
                 "source_id": {
                     "type": "string",
                     "description": "Source message ID for back-linking (e.g. WhatsApp message ID).",
                 },
+                "client_id": {
+                    "type": "string",
+                    "description": (
+                        "Canonical client slug (YAML id) to link this ticket "
+                        "to. Get from resolve_or_upsert_client / query_client."
+                    ),
+                },
             },
             "required": ["title"],
+            "additionalProperties": False,
         },
     },
+    # --- end Agente Desktop create-ticket schema canonical patch (desktop-20260604-track-b) ---
+
     "move_ticket": {
         "name": "move_ticket",
         "description": (
@@ -530,6 +591,100 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "required": ["runId", "stepIndex"],
         },
     },
+    "save_executable_workflow": {
+        "name": "save_executable_workflow",
+        "description": (
+            "Create or update a multi-step agent workflow in the workspace. "
+            "Validates the input against the Desktop workflow schema and "
+            "persists the result as a YAML file under "
+            "agente-workspace/office/workflows/. Use this tool when the "
+            "operator asks you to build or modify a workflow. After saving, "
+            "workflows are inspectable via inspect_workflow and runnable via "
+            "start_workflow_run."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "workflow_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        'Stable kebab-case workflow identifier (e.g. "wa-triage"). '
+                        "Must match the pattern ^[a-z0-9]+(?:-[a-z0-9]+)*$."
+                    ),
+                },
+                "agents": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": (
+                        "Ordered list of workflow steps. Each step defines a "
+                        "single agent action."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step_id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "Stable kebab-case step identifier.",
+                            },
+                            "role": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": (
+                                    "Workspace-relative role manifest path "
+                                    '(e.g. "ops/roles/triage-agent.yaml").'
+                                ),
+                            },
+                            "skill_ref": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "Workspace-relative skill reference.",
+                            },
+                            "lane": {
+                                "type": "string",
+                                "enum": ["safe", "supervised", "locked"],
+                                "description": "Desktop governance lane for this step.",
+                            },
+                            "instructions": {
+                                "type": "string",
+                                "description": (
+                                    "Optional natural-language instructions "
+                                    "passed to the sidecar agent for this step."
+                                ),
+                            },
+                            "artifact_path": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": (
+                                    "Expected run artifact path relative to "
+                                    "agente-workspace/."
+                                ),
+                            },
+                            "ticket_transition": {
+                                "type": "object",
+                                "properties": {
+                                    "from": {"type": "string", "minLength": 1},
+                                    "to": {"type": "string", "minLength": 1},
+                                },
+                                "required": ["from", "to"],
+                                "description": "Ticket label transition for this step.",
+                            },
+                        },
+                        "required": [
+                            "step_id",
+                            "role",
+                            "skill_ref",
+                            "lane",
+                            "artifact_path",
+                            "ticket_transition",
+                        ],
+                    },
+                },
+            },
+            "required": ["workflow_id", "agents"],
+        },
+    },
     "evaluate_triage_rules": {
         "name": "evaluate_triage_rules",
         "description": (
@@ -571,6 +726,600 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "required": ["source", "type"],
         },
     },
+    # --- Agente Desktop folder-sandbox schemas patch (desktop-202605-folder-tools) ---
+    "read_file": {
+        "name": "read_file",
+        "description": (
+            "Reads a file from a connected folder. Returns text content for "
+            'text files; returns a {"kind":"binary", "sizeBytes", "mimeType"} '
+            "descriptor for binary files. Paths must be inside an allowlisted "
+            "connected folder; out-of-allowlist access fails closed with a "
+            "structured error."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute or relative path to the file. Relative paths "
+                        "resolve against the primary connected folder."
+                    ),
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    "read_document": {
+        "name": "read_document",
+        "description": (
+            "Reads a document file (PDF, DOCX, XLSX, PPTX) from a connected "
+            "folder and extracts its text content. Binary and image files "
+            "return a descriptor. Text files return their content directly. "
+            "Paths must be inside an allowlisted connected folder; "
+            "out-of-allowlist access fails closed with a structured error."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute or relative path to the document. Relative "
+                        "paths resolve against the primary connected folder."
+                    ),
+                },
+                "maxChars": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum number of characters to return. Defaults to "
+                        "50000. Content beyond this limit is truncated and "
+                        'marked with "truncated": true.'
+                    ),
+                },
+                "pageRange": {
+                    "type": "object",
+                    "description": (
+                        "Optional page range for PDFs. Use {start: N, end: M} "
+                        "to extract only those pages (1-indexed, inclusive)."
+                    ),
+                    "properties": {
+                        "start": {"type": "integer"},
+                        "end": {"type": "integer"},
+                    },
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    "write_file": {
+        "name": "write_file",
+        "description": (
+            "Writes a text file inside a connected folder. First use emits an "
+            "approval.request; once the operator approves the resulting "
+            "pending_review ticket, the call must be retried with approval_id "
+            "and the file is written then. Paths must be inside an allowlisted "
+            "connected folder; out-of-allowlist or no-folder-connected requests "
+            "fail closed with a structured error. Content size capped at 2MB."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute or relative path to the file to write. "
+                        "Relative paths resolve against the primary connected "
+                        "folder."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "UTF-8 text content to write to the file. Maximum 2MB."
+                    ),
+                },
+                "approval_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Set this to the approval_id returned from "
+                        "the first call to retry the write once the operator "
+                        "approved it on the ticket board."
+                    ),
+                },
+            },
+            "required": ["path", "content"],
+        },
+    },
+    "list_directory": {
+        "name": "list_directory",
+        "description": (
+            "Lists immediate entries (files and subdirectories) of a folder "
+            "inside an allowlisted connected folder. Supports an optional "
+            'basename glob pattern (e.g. "*.pdf"). Out-of-allowlist paths fail '
+            "closed with a structured error."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute or relative directory path. Relative paths "
+                        "resolve against the primary connected folder."
+                    ),
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": (
+                        'Optional basename glob (e.g. "*.pdf", "invoice-*"). '
+                        "Matches case-insensitively."
+                    ),
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    "scan_folder": {
+        "name": "scan_folder",
+        "description": (
+            "Scans a folder for files matching an optional basename glob "
+            "pattern. Recursive by default. Returns a list of relative file "
+            "paths capped by `limit` (default 500). Out-of-allowlist paths "
+            "fail closed with a structured error."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute or relative directory path. Relative paths "
+                        "resolve against the primary connected folder."
+                    ),
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": (
+                        "If false, only scans the immediate directory. "
+                        "Defaults to true."
+                    ),
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": (
+                        'Optional basename glob (e.g. "*.pdf"). Matches '
+                        "case-insensitively."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum number of files to return. Defaults to 500, "
+                        "hard cap 5000."
+                    ),
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    # --- end Agente Desktop folder-sandbox schemas patch (desktop-202605-folder-tools) ---
+
+    # --- Agente Desktop data-surface schemas patch (desktop-202605-data-tools) ---
+    "data_read": {
+        "name": "data_read",
+        "description": (
+            "Reads structured data from a named surface registry. Use "
+            'surface="_index" to list all available surfaces and their schemas.'
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "surface": {
+                    "type": "string",
+                    "description": (
+                        'The surface identifier to read from. Use "_index" to '
+                        "list all surfaces."
+                    ),
+                },
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Query or slice hint passed to the surface read "
+                        'handler. Defaults to "all".'
+                    ),
+                },
+                "slice": {
+                    "type": "string",
+                    "description": (
+                        "Alias for query. Surface-specific slice selector."
+                    ),
+                },
+            },
+            "required": ["surface"],
+            "additionalProperties": False,
+        },
+    },
+    "data_write": {
+        "name": "data_write",
+        "description": (
+            "Writes structured mutations to a named surface registry entry. "
+            "Supports dry_run to validate without applying."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "surface": {
+                    "type": "string",
+                    "description": "The surface identifier to write to.",
+                },
+                "mutation": {
+                    "type": "string",
+                    "description": (
+                        'The mutation type to apply (e.g. "upsert").'
+                    ),
+                },
+                "payload": {
+                    "type": "object",
+                    "description": "The patch payload to write.",
+                    "additionalProperties": True,
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": (
+                        "When true, validates the payload and returns the "
+                        "planned mutation without writing."
+                    ),
+                },
+            },
+            "required": ["surface", "mutation", "payload"],
+            "additionalProperties": False,
+        },
+    },
+    # --- end Agente Desktop data-surface schemas patch (desktop-202605-data-tools) ---
+
+    # --- Agente Desktop web-connector schemas patch (desktop-202605-336) ---
+    "list_web_connectors": {
+        "name": "list_web_connectors",
+        "description": (
+            "List the web connectors the operator has configured (URL, label, auth_type). "
+            "Use this to find a connector_id before calling browse_connector."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "browse_connector": {
+        "name": "browse_connector",
+        "description": (
+            "Navigate a saved web connector and execute an instruction. Requires operator "
+            "approval before the first use per connector per session."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "connector_id": {
+                    "type": "string",
+                    "description": "The connector_id of the saved web connector to navigate.",
+                },
+                "instruction": {
+                    "type": "string",
+                    "description": "Natural-language instruction describing what to do on the site.",
+                },
+                "approved": {
+                    "type": "boolean",
+                    "description": "Set to true after the operator explicitly approves this navigation.",
+                },
+            },
+            "required": ["connector_id", "instruction"],
+        },
+    },
+    # --- end Agente Desktop web-connector schemas patch (desktop-202605-336) ---
+
+    # --- Agente Desktop routines-surface schemas patch (desktop-202605-283) ---
+    "list_routines": {
+        "name": "list_routines",
+        "description": "List all scheduled routine jobs registered with the Hermes sidecar.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "get_routine": {
+        "name": "get_routine",
+        "description": "Get the detail and run history for a specific routine job.",
+        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+    },
+    "run_routine": {
+        "name": "run_routine",
+        "description": "Trigger an immediate run of a routine job.",
+        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+    },
+    "pause_routine": {
+        "name": "pause_routine",
+        "description": "Pause a scheduled routine job so it no longer fires on its cron schedule.",
+        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+    },
+    "resume_routine": {
+        "name": "resume_routine",
+        "description": "Resume a previously paused routine job.",
+        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+    },
+    "delete_routine": {
+        "name": "delete_routine",
+        "description": "Delete a routine from the scheduler. Accepts a user-facing routine slug or scheduler job ID.",
+        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+    },
+    # --- end Agente Desktop routines-surface schemas patch (desktop-202605-283) ---
+
+    # --- Agente Desktop agent-tip schemas patch (desktop-202606-423) ---
+    "suggest_client_tip": {
+        "name": "suggest_client_tip",
+        "description": (
+            "Returns the agent tip card payload for a single client. Reads the "
+            "markdown cache at office/clients/<id>/agent-tip.md and, on "
+            "force=true, regenerates it. The user-instructed-triage persona "
+            "suppresses auto-generation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "clientId": {"type": "string"},
+                "persona": {"type": "string"},
+                "force": {"type": "boolean"},
+            },
+            "required": ["clientId"],
+            "additionalProperties": False,
+        },
+    },
+    # --- end Agente Desktop agent-tip schemas patch (desktop-202606-423) ---
+
+    # --- Agente Desktop download-whatsapp-media schema patch (hermes-202606-download-whatsapp-media-schema) ---
+    "download_whatsapp_media": {
+        "name": "download_whatsapp_media",
+        "description": (
+            "Downloads a WhatsApp media attachment (image / document / audio / "
+            "video) referenced by message_id from a connected GOWA WhatsApp "
+            "account, and writes it to dest_path inside an allowlisted "
+            "connected folder. Media is fetched via the single GOWA REST "
+            "process through desktop IPC — Python must never call GOWA "
+            "directly. First-use per session emits an approval.request on the "
+            "desktop side; out-of-allowlist dest_path fails closed with a "
+            "structured error."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "account_id": {
+                    "type": "string",
+                    "description": (
+                        "GOWA WhatsApp account id (matches an entry returned "
+                        "by list_whatsapp_accounts)."
+                    ),
+                },
+                "message_id": {
+                    "type": "string",
+                    "description": (
+                        "Id of the WhatsApp message whose media attachment "
+                        "should be downloaded."
+                    ),
+                },
+                "chat_jid": {
+                    "type": "string",
+                    "description": (
+                        "Chat JID the message belongs to — from the "
+                        "list_recent_messages chat_jid field. Required by "
+                        "the GOWA REST download endpoint."
+                    ),
+                },
+                "media_type": {
+                    "type": "string",
+                    "description": (
+                        'Expected media kind, one of "image" | "document" | '
+                        '"audio" | "video". Used by the desktop side to '
+                        "select the correct GOWA endpoint and mime-sniff the "
+                        "result."
+                    ),
+                },
+                "dest_path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute or connected-folder-relative destination "
+                        "path for the downloaded file. Must resolve inside "
+                        "an allowlisted connected folder."
+                    ),
+                },
+            },
+            "required": ["account_id", "message_id", "chat_jid", "media_type", "dest_path"],
+            "additionalProperties": False,
+        },
+    },
+    # --- end Agente Desktop download-whatsapp-media schema patch (hermes-202606-download-whatsapp-media-schema) ---
+
+    # --- Agente Desktop OAuth connector tools schemas patch (desktop-connector-cascade-001) ---
+    "connect_google": {
+        "name": "connect_google",
+        "description": (
+            "Start the Google (Gmail + Calendar) OAuth flow on behalf of the "
+            "user. Opens the system browser for consent. Returns a structured "
+            "status envelope (status=connected with the email, or error with "
+            "Hebrew error_he)."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "connect_anthropic": {
+        "name": "connect_anthropic",
+        "description": (
+            "Start the Anthropic (Claude) OAuth/PKCE sign-in on behalf of the "
+            "user. Returns status=pending with auth_url + session_id so the "
+            "chat can surface the link; the renderer completes the flow via "
+            "the existing BYOK card."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "connect_openai": {
+        "name": "connect_openai",
+        "description": (
+            "Start the OpenAI (ChatGPT Plus / Codex) OAuth device-code flow on "
+            "behalf of the user. Returns status=pending with verification_uri "
+            "+ user_code so the chat can read the URL and code out loud."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "check_connector_status": {
+        "name": "check_connector_status",
+        "description": (
+            "Read-only check of the current connection status for a given "
+            "provider (google / anthropic / openai). Never starts an OAuth "
+            "flow. Returns connected (with account when known), needs_reauth, "
+            "or error."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": ["google", "anthropic", "openai"],
+                },
+            },
+            "required": ["provider"],
+        },
+    },
+    # --- end Agente Desktop OAuth connector tools schemas patch (desktop-connector-cascade-001) ---
+
+    # --- Agente Desktop assign-ticket schema patch (desktop-202606-535) ---
+    "assign_ticket": {
+        "name": "assign_ticket",
+        "description": (
+            "Assigns an existing ticket to a team member declared in "
+            "office/profile.yaml team_members[]. Accepts the team_member id "
+            "(e.g. \"leon\") OR display name (e.g. \"לאון\"); Hebrew-nikud-"
+            "insensitive fuzzy match. Returns a Hebrew confirmation message "
+            "and the resolved team_member; returns a structured error listing "
+            "valid team_members when no match."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ticket_id": {
+                    "type": "string",
+                    "description": "UUID of the ticket to assign.",
+                },
+                "team_member": {
+                    "type": "string",
+                    "description": (
+                        "team_members[].id (e.g. \"leon\") OR display name "
+                        "(e.g. \"לאון\" / \"לאון זינגר\")."
+                    ),
+                },
+            },
+            "required": ["ticket_id", "team_member"],
+        },
+    },
+    # --- end Agente Desktop assign-ticket schema patch (desktop-202606-535) ---
+
+    # --- Agente Desktop resolve_or_upsert_client schema patch (desktop-202606-536) ---
+    "resolve_or_upsert_client": {
+        "name": "resolve_or_upsert_client",
+        "description": (
+            "Resolve a client by slug / alias / Hebrew partial-name. If none "
+            "matches, create a new YAML client and return its slug. Always "
+            "returns {slug, was_created}. Use this before create_ticket "
+            "whenever a person/business is named in the user request, then "
+            "pass the returned slug as client_id."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name_or_slug": {"type": "string"},
+                "hebrew_name": {"type": "string"},
+                "phone": {"type": "string"},
+                "jid": {"type": "string"},
+                "email": {"type": "string"},
+            },
+            "required": ["name_or_slug"],
+        },
+    },
+    # --- end Agente Desktop resolve_or_upsert_client schema patch (desktop-202606-536) ---
+
+    # --- Agente Desktop agent-management (profile) schemas patch (desktop-202606-578) ---
+    "list_agent_profiles": {
+        "name": "list_agent_profiles",
+        "description": (
+            "List all Hermes agent profiles available for workflows and team "
+            "management. Shows name, model, skill count, gateway status, and "
+            "description for each profile."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "create_agent_profile": {
+        "name": "create_agent_profile",
+        "description": (
+            "Create a new Hermes agent profile for use in workflows and team "
+            "management. The new profile has its own isolated config, skills, "
+            "memory, and sessions. By default it clones from the current agent "
+            "profile so it inherits model and credentials."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Profile name (lowercase, alphanumeric, hyphens, "
+                        "underscores). Pattern: [a-z0-9][a-z0-9_-]{0,63}. "
+                        'Examples: "communication-agent", "office-manager".'
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "One- to two-sentence description of what this agent "
+                        "is good at, for kanban routing."
+                    ),
+                },
+                "soul_content": {
+                    "type": "string",
+                    "description": (
+                        "SOUL.md persona content in Hebrew. If omitted, uses "
+                        "the default Agente office personality."
+                    ),
+                },
+                "clone_from": {
+                    "type": "string",
+                    "description": (
+                        "Source profile to clone config from. Defaults to "
+                        "'default' (current desktop agent)."
+                    ),
+                },
+                "clone_all": {
+                    "type": "boolean",
+                    "description": (
+                        "Full state copy (all config, skills, memory, sessions) "
+                        "from source. Default: false (copies config + skills only)."
+                    ),
+                },
+                "no_skills": {
+                    "type": "boolean",
+                    "description": (
+                        "Skip bundled skill seeding. Use for bare profiles that "
+                        "get custom skills later. Default: false."
+                    ),
+                },
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "Model identifier. Only set if different from default."
+                    ),
+                },
+                "provider": {
+                    "type": "string",
+                    "description": (
+                        "Model provider (e.g., \"openai\", \"anthropic\", "
+                        "\"custom\"). Required when model is set."
+                    ),
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    # --- end Agente Desktop agent-management (profile) schemas patch (desktop-202606-578) ---
+
 }
 
 
