@@ -1785,6 +1785,12 @@ DEFAULT_CONFIG = {
             "enabled": True,
             "keep": 5,  # retain last N regular snapshots
         },
+        # Opt-in list of installed (non-agent-created) skill names that the
+        # curator may content-patch as if they were agent-created skills.
+        # Skills in this list receive the same backup/rollback/audit safety as
+        # agent-created skills. Hub-installed skills NOT on this list remain
+        # strictly off-limits. Empty by default (no managed packs).
+        "managed_packs": [],
     },
 
     # Honcho AI-native memory -- reads ~/.honcho/config.json as single source of truth.

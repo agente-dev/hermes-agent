@@ -51,6 +51,43 @@ curator:
 
 To disable entirely, set `curator.enabled: false`.
 
+## Managed packs
+
+By default the curator **never content-patches** bundled or hub-installed skills — it treats them as read-only. The `managed_packs` key lets you opt specific installed skills into the same full content-patch + archive cycle the curator applies to agent-created skills.
+
+```yaml
+curator:
+  managed_packs:
+    - my-org-pack
+    - shared-workflows
+```
+
+### What changes for a managed pack
+
+| Behavior | Agent-created | Managed pack | Non-allowlisted bundled/hub |
+|---|---|---|---|
+| Content-patch (SKILL.md update) | Yes | Yes | No |
+| Archive on staleness | Yes | Yes | No (bundled) / Never (hub) |
+| Pre-run backup | Yes | Yes | — |
+| Rollback via `hermes curator rollback` | Yes | Yes | — |
+| Audit trail in `run.json` | Yes | Yes | — |
+
+### Safety guarantees
+
+Managed packs inherit the exact same safety path as agent-created skills:
+
+- A full snapshot of `~/.hermes/skills/` is taken before every real (non-dry-run) curator pass.
+- The LLM reviewer is instructed that managed packs may be patched or archived, but **never deleted**.
+- Rollback and restore commands work identically: `hermes curator rollback` and `hermes curator restore <name>`.
+
+### When to use this
+
+Use `managed_packs` when you have organisation-internal skills distributed as hub packs (or bundled customisations) that you also want the curator to keep tidy. Do **not** add third-party skills from external publishers unless you are confident in their content — opting a skill in means the curator's LLM pass can rewrite it.
+
+:::warning
+Adding a skill to `managed_packs` bypasses the default safety boundary that protects installed skills from automated modification. Only add skills your team owns or fully trusts.
+:::
+
 ### Running the review on a cheaper aux model
 
 The curator's LLM review pass is a regular auxiliary task slot — `auxiliary.curator` — alongside Vision, Compression, Session Search, etc. "Auto" means "use my main chat model"; override the slot to pin a specific provider + model for the review pass instead.
