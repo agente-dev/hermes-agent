@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -251,3 +252,53 @@ def test_managed_packs_note_in_prompt(curator_env, monkeypatch):
     assert captured, "Expected _run_llm_review to be called"
     assert "MANAGED-PACKS OVERRIDE" in captured[0]
     assert "managed-pack" in captured[0]
+
+
+# ---------------------------------------------------------------------------
+# Test 6: Rollback restores prior content for a managed-pack skill
+# ---------------------------------------------------------------------------
+
+def test_rollback_restores_managed_pack_content(tmp_path, monkeypatch):
+    """snapshot → content-patch → rollback must restore the original SKILL.md.
+
+    This test exercises the backup/rollback plumbing (curator_backup) for a
+    managed-pack skill:
+      (a) The pre-patch snapshot is created via snapshot_skills.
+      (b) The skill content is modified (simulating a curator content-patch).
+      (c) rollback() restores the original SKILL.md content.
+    """
+    # Set up isolated HERMES_HOME.
+    home = tmp_path / ".hermes"
+    skills_dir = home / "skills"
+    skills_dir.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    import agent.curator_backup as cb
+    importlib.reload(cb)
+
+    # Create a managed-pack skill with known original content.
+    pack_dir = skills_dir / "my-managed-pack"
+    pack_dir.mkdir()
+    original_content = "---\nname: my-managed-pack\ndescription: original\n---\n\nOriginal skill body.\n"
+    (pack_dir / "SKILL.md").write_text(original_content, encoding="utf-8")
+
+    # (a) Take a pre-patch snapshot.
+    snap = cb.snapshot_skills(reason="pre-curator-run")
+    assert snap is not None, "snapshot_skills should succeed"
+    assert (snap / "skills.tar.gz").exists(), "snapshot archive must exist"
+
+    # (b) Simulate a curator content-patch — overwrite SKILL.md.
+    patched_content = "---\nname: my-managed-pack\ndescription: patched\n---\n\nPatched skill body.\n"
+    (pack_dir / "SKILL.md").write_text(patched_content, encoding="utf-8")
+    assert (pack_dir / "SKILL.md").read_text(encoding="utf-8") == patched_content
+
+    # (c) Rollback to the pre-patch snapshot.
+    ok, msg, rolled_snap = cb.rollback()
+    assert ok, f"rollback() should succeed; got: {msg}"
+
+    # Original content must be restored.
+    restored = (skills_dir / "my-managed-pack" / "SKILL.md").read_text(encoding="utf-8")
+    assert restored == original_content, (
+        f"rollback should restore original SKILL.md content.\nGot:\n{restored}"
+    )
