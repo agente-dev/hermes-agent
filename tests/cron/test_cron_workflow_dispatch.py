@@ -114,6 +114,72 @@ def test_resolve_dispatch_url_none(hermes_env):
     assert resolve_dispatch_url() is None
 
 
+def test_resolve_dispatch_url_hermes_home_dotenv(hermes_env, monkeypatch):
+    """URL from HERMES_HOME/.env is used when process env is absent."""
+    dotenv_path = hermes_env / ".env"
+    dotenv_path.write_text("HERMES_WORKFLOW_DISPATCH_URL=http://fresh-host:8765/api/workflow-runs\n")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_env))
+
+    from gateway.agente_desktop_adapter import workflow_routine_bridge as br
+    br._patch_cron_workflow_dispatch()
+    from cron.workflow_dispatch import resolve_dispatch_url
+    assert resolve_dispatch_url() == "http://fresh-host:8765/api/workflow-runs"
+
+
+def test_resolve_dispatch_url_dotenv_takes_priority_over_stale_process_env(hermes_env, monkeypatch):
+    """File URL supersedes stale process-env value set at sidecar spawn time.
+
+    Simulates a gateway port change on app restart: the companion app writes
+    the new dispatch URL to HERMES_HOME/.env before spawning the sidecar,
+    but the sidecar process env still holds the old URL from a previous run.
+    """
+    dotenv_path = hermes_env / ".env"
+    dotenv_path.write_text("HERMES_WORKFLOW_DISPATCH_URL=http://127.0.0.1:9999/api/workflow-runs\n")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_env))
+    # Stale URL that would have been set at the previous sidecar spawn.
+    monkeypatch.setenv("HERMES_WORKFLOW_DISPATCH_URL", "http://127.0.0.1:1111/api/workflow-runs")
+
+    from gateway.agente_desktop_adapter import workflow_routine_bridge as br
+    br._patch_cron_workflow_dispatch()
+    from cron.workflow_dispatch import resolve_dispatch_url
+    assert resolve_dispatch_url() == "http://127.0.0.1:9999/api/workflow-runs"
+
+
+def test_resolve_dispatch_url_dotenv_updates_dynamically(hermes_env, monkeypatch, tmp_path):
+    """Simulates two consecutive app restarts: each writes a new URL to .env.
+
+    Verifies that the resolver picks up the CURRENT file content on each
+    scheduled fire, not a cached value from a previous call.
+    """
+    dotenv_path = hermes_env / ".env"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_env))
+
+    from gateway.agente_desktop_adapter import workflow_routine_bridge as br
+    br._patch_cron_workflow_dispatch()
+    from cron.workflow_dispatch import resolve_dispatch_url
+
+    # First app start: gateway on port 5001.
+    dotenv_path.write_text("HERMES_WORKFLOW_DISPATCH_URL=http://127.0.0.1:5001/api/workflow-runs\n")
+    assert resolve_dispatch_url() == "http://127.0.0.1:5001/api/workflow-runs"
+
+    # App restart: gateway now on port 5002.
+    dotenv_path.write_text("HERMES_WORKFLOW_DISPATCH_URL=http://127.0.0.1:5002/api/workflow-runs\n")
+    assert resolve_dispatch_url() == "http://127.0.0.1:5002/api/workflow-runs"
+
+
+def test_resolve_dispatch_url_dotenv_absent_falls_back_to_process_env(hermes_env, monkeypatch):
+    """When HERMES_HOME/.env has no dispatch key, process env is used."""
+    dotenv_path = hermes_env / ".env"
+    dotenv_path.write_text("SOME_OTHER_KEY=value\n")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_env))
+    monkeypatch.setenv("HERMES_WORKFLOW_DISPATCH_URL", "http://env-fallback/api/workflow-runs")
+
+    from gateway.agente_desktop_adapter import workflow_routine_bridge as br
+    br._patch_cron_workflow_dispatch()
+    from cron.workflow_dispatch import resolve_dispatch_url
+    assert resolve_dispatch_url() == "http://env-fallback/api/workflow-runs"
+
+
 # ---------------------------------------------------------------------------
 # _run_job_impl branch
 # ---------------------------------------------------------------------------
