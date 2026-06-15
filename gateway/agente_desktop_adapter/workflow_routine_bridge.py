@@ -164,8 +164,40 @@ def _wrap_save_with_mirror(orig_save, bound_getter):
 
 # --- dispatch URL + workflows dir patching (AGENTE_DESKTOP_* support) ---
 
+def _read_key_from_env_file(env_path: str, key: str) -> Optional[str]:
+    """Read a single ``KEY=value`` entry from a .env file without caching.
+
+    Returns the stripped value string, or ``None`` when the file is absent,
+    unreadable, or does not contain ``key``.  The read happens on every call
+    so callers always see the latest value written by the companion app.
+    """
+    prefix = f"{key}="
+    try:
+        with open(env_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped.startswith(prefix):
+                    return stripped[len(prefix):].strip() or None
+    except OSError:
+        pass
+    return None
+
+
 def _patch_cron_workflow_dispatch() -> None:
-    """Patch resolve_dispatch_url to honor AGENTE_DESKTOP_BASE_URL (in addition to HERMES_)."""
+    """Patch resolve_dispatch_url to resolve the gateway URL dynamically.
+
+    Resolution order on each scheduled fire:
+
+    1. ``HERMES_HOME/.env`` file — re-read on every call so the URL stays
+       current after the companion app restarts with a new gateway port
+       without restarting the sidecar process.  Takes priority over the
+       process env because the process env was captured at sidecar spawn
+       time and can become stale on companion restart.
+    2. ``HERMES_WORKFLOW_DISPATCH_URL`` process env — set at sidecar spawn
+       time; fallback for standalone/non-desktop installs and tests.
+    3. ``AGENTE_DESKTOP_BASE_URL`` process env — companion base-URL fallback
+       for installs that set the base URL but not the full dispatch URL.
+    """
     try:
         import cron.workflow_dispatch as wd
     except Exception:
@@ -176,16 +208,35 @@ def _patch_cron_workflow_dispatch() -> None:
         return
 
     def _patched_resolve() -> Optional[str]:
+        # 1. HERMES_HOME/.env — re-read on every call so the URL stays
+        #    current after the companion app restarts with a new gateway
+        #    port.  File takes priority over the process env because the
+        #    process env was captured at sidecar spawn time and can become
+        #    stale when the companion app restarts without restarting the
+        #    sidecar.
+        hermes_home = (os.getenv("HERMES_HOME") or "").strip()
+        if hermes_home:
+            env_path = os.path.join(hermes_home, ".env")
+            url_from_file = _read_key_from_env_file(env_path, "HERMES_WORKFLOW_DISPATCH_URL")
+            if url_from_file:
+                return url_from_file
+        # 2. Process env — set at sidecar spawn time.  Used as the
+        #    fallback when HERMES_HOME/.env does not contain the key
+        #    (standalone installs, non-desktop deployments, tests).
         explicit = (os.getenv("HERMES_WORKFLOW_DISPATCH_URL") or "").strip()
         if explicit:
             return explicit
+        # 3. Base-URL construction fallback.
         base = (os.getenv("AGENTE_DESKTOP_BASE_URL") or "").strip().rstrip("/")
         if base:
             return f"{base}/api/workflow-runs"
         return None
 
     wd.resolve_dispatch_url = _patched_resolve  # type: ignore[attr-defined]
-    logger.debug("agente_desktop_adapter: patched cron.workflow_dispatch.resolve_dispatch_url for AGENTE_DESKTOP_BASE_URL")
+    logger.debug(
+        "agente_desktop_adapter: patched cron.workflow_dispatch.resolve_dispatch_url "
+        "(dynamic resolution via HERMES_HOME/.env + AGENTE_DESKTOP_BASE_URL)"
+    )
 
 
 def _patch_workflow_cron_registry() -> None:

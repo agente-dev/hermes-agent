@@ -26,6 +26,16 @@ Resolution order for the dispatch path:
    engine at ``HERMES_WORKFLOW_DISPATCH_URL`` (or
    ``AGENTE_DESKTOP_BASE_URL``-derived URL via adapter patch).
 
+   URL resolution for HTTP dispatch (resolved on each scheduled fire):
+
+   a. ``HERMES_HOME/.env`` — re-read on every call so a companion app
+      restart that changes the gateway port is picked up without
+      restarting the sidecar.
+   b. ``HERMES_WORKFLOW_DISPATCH_URL`` process env — fallback for
+      standalone/non-desktop installs.
+   c. ``AGENTE_DESKTOP_BASE_URL`` process env — base-URL construction
+      fallback (patched in by the adapter layer).
+
 3. ``None`` — caller falls back to the legacy prompt-spawn LLM path so
    pre-routine-workflow installs keep working unchanged.
 
