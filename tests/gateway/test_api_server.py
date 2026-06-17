@@ -1242,6 +1242,127 @@ class TestChatCompletionsEndpoint:
             assert pairs[1] == ("completed", "call_terminal_1"), pairs
 
     @pytest.mark.asyncio
+    async def test_stream_tool_completed_includes_parsed_result(self, adapter):
+        """``/v1/chat/completions`` tool-completion frames must include
+        the ``function_result`` under a ``result`` key.  JSON-string
+        results are parsed into objects so consumers can read nested
+        fields (e.g. ``result.rendered``) directly."""
+        import asyncio
+        import json as _json
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                cb = kwargs.get("stream_delta_callback")
+                ts_cb = kwargs.get("tool_start_callback")
+                tc_cb = kwargs.get("tool_complete_callback")
+                if ts_cb:
+                    ts_cb("call_docs_1", "smart_docs_render", {"prompt": "test"})
+                if tc_cb:
+                    tc_cb("call_docs_1", "smart_docs_render", {"prompt": "test"},
+                          '{"rendered":"# Title","generated_path":"/tmp/doc.md"}')
+                if cb:
+                    await asyncio.sleep(0.05)
+                    cb("done.")
+                return (
+                    {"final_response": "done.", "messages": [], "api_calls": 1},
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "render"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+
+            # Find the completed event payload
+            completed_payload = None
+            lines = body.splitlines()
+            for i, line in enumerate(lines):
+                if line.strip() != "event: hermes.tool.progress":
+                    continue
+                for follow in lines[i + 1: i + 4]:
+                    if follow.startswith("data: "):
+                        try:
+                            payload = _json.loads(follow[len("data: "):])
+                        except _json.JSONDecodeError:
+                            break
+                        if payload.get("status") == "completed":
+                            completed_payload = payload
+                        break
+
+            assert completed_payload is not None, "no completed event found"
+            assert "result" in completed_payload, (
+                f"completed event missing result key: {completed_payload}"
+            )
+            # result must be an object, not a bare string
+            assert isinstance(completed_payload["result"], dict), (
+                f"result should be parsed JSON, got {type(completed_payload['result'])}"
+            )
+            assert completed_payload["result"]["rendered"] == "# Title"
+            assert completed_payload["result"]["generated_path"] == "/tmp/doc.md"
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_completed_plain_string_result(self, adapter):
+        """Non-JSON string results are emitted as-is under ``result``."""
+        import asyncio
+        import json as _json
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                cb = kwargs.get("stream_delta_callback")
+                ts_cb = kwargs.get("tool_start_callback")
+                tc_cb = kwargs.get("tool_complete_callback")
+                if ts_cb:
+                    ts_cb("call_t1", "terminal", {"command": "pwd"})
+                if tc_cb:
+                    tc_cb("call_t1", "terminal", {"command": "pwd"}, "/home/user")
+                if cb:
+                    await asyncio.sleep(0.05)
+                    cb("done.")
+                return (
+                    {"final_response": "done.", "messages": [], "api_calls": 1},
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "pwd"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+
+            completed_payload = None
+            lines = body.splitlines()
+            for i, line in enumerate(lines):
+                if line.strip() != "event: hermes.tool.progress":
+                    continue
+                for follow in lines[i + 1: i + 4]:
+                    if follow.startswith("data: "):
+                        try:
+                            payload = _json.loads(follow[len("data: "):])
+                        except _json.JSONDecodeError:
+                            break
+                        if payload.get("status") == "completed":
+                            completed_payload = payload
+                        break
+
+            assert completed_payload is not None, "no completed event found"
+            assert completed_payload.get("result") == "/home/user"
+
+    @pytest.mark.asyncio
     async def test_stream_tool_lifecycle_skips_internal_and_orphan_completes(self, adapter):
         """Internal tools (``_thinking``-style) and ``completed`` events
         without a prior matching ``running`` must produce no lifecycle
