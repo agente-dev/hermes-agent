@@ -973,6 +973,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        reasoning_callback=None,
         gateway_session_key: Optional[str] = None,
     ) -> Any:
         """
@@ -1021,6 +1022,7 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
+            reasoning_callback=reasoning_callback,
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
@@ -1939,6 +1941,36 @@ class APIServerAdapter(BasePlatformAdapter):
                         frame["result"] = function_result
                 _stream_q.put(("__tool_progress__", frame))
 
+            # Surface the model's chain-of-thought as a transparency panel.
+            # deepseek-v4-pro returns *structured* ``delta.reasoning_content``
+            # (not inline ``<think>``), which the agent extracts and forwards
+            # via ``reasoning_callback``.  We push it onto the same queue the
+            # SSE writer drains, tagged ``__reasoning__`` so ``_emit`` renders
+            # it as a named ``event: reasoning.step`` frame the desktop
+            # ``emitReasoningFromPayload`` consumer understands.  A stable id
+            # lets the desktop upsert successive deltas into one growing step
+            # rather than spawning a new bubble per token.
+            _reasoning_step_id = f"reasoning-{completion_id}"
+
+            def _on_reasoning(text):
+                if not text:
+                    return
+                _stream_q.put(("__reasoning__", {
+                    "id": _reasoning_step_id,
+                    "reasoning": text,
+                    "status": "active",
+                }))
+
+            # Kill-switch: reasoning is on by default; only a falsey
+            # HERMES_EMIT_REASONING value hides raw chain-of-thought (e.g. to
+            # keep English/technical thinking off a customer surface) without
+            # needing a rebuild.  When off we never register the callback, so
+            # no reasoning frames reach the wire.
+            _emit_reasoning = os.getenv("HERMES_EMIT_REASONING", "1").strip().lower() not in (
+                "0", "false", "no", "off", ""
+            )
+            _reasoning_cb = _on_reasoning if _emit_reasoning else None
+
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
             #
@@ -1956,6 +1988,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 stream_delta_callback=_on_delta,
                 tool_start_callback=_on_tool_start,
                 tool_complete_callback=_on_tool_complete,
+                reasoning_callback=_reasoning_cb,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
             ))
@@ -2137,6 +2170,16 @@ class APIServerAdapter(BasePlatformAdapter):
                     event_data = json.dumps(item[1])
                     await response.write(
                         f"event: hermes.tool.progress\ndata: {event_data}\n\n".encode()
+                    )
+                elif isinstance(item, tuple) and len(item) == 2 and item[0] == "__reasoning__":
+                    # Custom ``event: reasoning.step`` frame carrying the
+                    # model's chain-of-thought.  The desktop's
+                    # ``emitReasoningFromPayload`` reads the ``reasoning``
+                    # body plus ``id``/``status`` to upsert a transparency
+                    # step.  Kept off conversation history like tool progress.
+                    event_data = json.dumps(item[1])
+                    await response.write(
+                        f"event: reasoning.step\ndata: {event_data}\n\n".encode()
                     )
                 else:
                     content_chunk = {
@@ -3566,6 +3609,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        reasoning_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
     ) -> tuple:
@@ -3590,6 +3634,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_progress_callback=tool_progress_callback,
                 tool_start_callback=tool_start_callback,
                 tool_complete_callback=tool_complete_callback,
+                reasoning_callback=reasoning_callback,
                 gateway_session_key=gateway_session_key,
             )
             if agent_ref is not None:
