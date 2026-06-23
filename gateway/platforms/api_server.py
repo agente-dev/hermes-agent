@@ -3266,8 +3266,23 @@ class APIServerAdapter(BasePlatformAdapter):
         if cron_err:
             return cron_err
         try:
+            # When ?include_disabled=true is passed, return EVERYTHING
+            # (paused + terminal completed one-shots), preserving the old
+            # explicit-flag behaviour.
             include_disabled = request.query.get("include_disabled", "").lower() in {"true", "1"}
-            jobs = _cron_list(include_disabled=include_disabled)
+            if include_disabled:
+                jobs = _cron_list(include_disabled=True)
+            else:
+                # Default list: include paused jobs so a routine does NOT vanish
+                # after the user pauses it (agente-desktop #155 — pausing sets
+                # enabled=False/state="paused"), but keep terminal "completed"
+                # one-shots out of the ordinary active list so finished runs
+                # don't leak in. Paused jobs keep their real enabled/state/
+                # last_status fields so the client can render a paused card.
+                jobs = [
+                    j for j in _cron_list(include_disabled=True)
+                    if j.get("enabled", True) or j.get("state") == "paused"
+                ]
             return web.json_response({"jobs": jobs})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
