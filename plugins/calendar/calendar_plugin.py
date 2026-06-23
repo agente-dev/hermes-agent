@@ -38,6 +38,26 @@ _SAFE_CHILD_ENV_KEYS = (
 _SECRET_ENV_KEYS = {"GOOGLE_WORKSPACE_CLI_CLIENT_SECRET"}
 
 
+def _event_timezone() -> str:
+    """Resolve the IANA timezone name to attach to created events.
+
+    Uses the shared ``hermes_time`` clock (``HERMES_TIMEZONE`` env →
+    ``config.yaml`` → server local). Falls back to ``Asia/Jerusalem`` — the
+    Hermes runtime default — when nothing is configured, so an 11:00 local
+    event is never silently written as 11:00 UTC. Any failure degrades to the
+    default rather than raising.
+    """
+    try:
+        from hermes_time import get_timezone
+
+        tz = get_timezone()
+        if tz is not None:
+            return str(tz)
+    except Exception:
+        pass
+    return "Asia/Jerusalem"
+
+
 def _gws_bin() -> str:
     """Resolve the gws binary path. Env wins, PATH fallback for dev."""
     explicit = os.environ.get("AG""ENTE_GWS_BIN")
@@ -148,10 +168,11 @@ def create_calendar_event(
     description: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new event. Returns the created event dict from gws."""
+    event_tz = _event_timezone()
     body: Dict[str, Any] = {
         "summary": title,
-        "start": {"dateTime": start, "timeZone": "UTC"},
-        "end": {"dateTime": end, "timeZone": "UTC"},
+        "start": {"dateTime": start, "timeZone": event_tz},
+        "end": {"dateTime": end, "timeZone": event_tz},
     }
     if attendees:
         body["attendees"] = [{"email": a} for a in attendees]

@@ -348,6 +348,41 @@ def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List
         )
 
 
+def _build_current_time_note() -> Optional[str]:
+    """Build a per-turn note carrying the CURRENT local date, time and zone.
+
+    The system prompt deliberately carries only a *date* line and is built
+    once per session (cached, byte-stable) so upstream prompt caches stay
+    warm — see ``agent/system_prompt.py``. That makes the model time-blind:
+    it can't tell morning from evening, and the date never advances during a
+    long-lived session.
+
+    This note is injected into the *current turn's user message* (not the
+    cached system prompt) on every turn, so it never busts the prompt-cache
+    prefix while still giving the model an accurate wall clock. Returns
+    ``None`` when disabled or if the clock cannot be read.
+
+    Gated by ``HERMES_INJECT_CURRENT_TIME`` (default ON). Set it to a falsey
+    value ("0"/"false") to suppress the note.
+    """
+    if not env_var_enabled("HERMES_INJECT_CURRENT_TIME", "1"):
+        return None
+    try:
+        from hermes_time import now as _hermes_now
+
+        now = _hermes_now()
+        tzname = now.tzname() or ""
+        # Prefer the IANA name (e.g. "Asia/Jerusalem") when available; fall
+        # back to the abbreviation/offset from ``tzname()``.
+        tzinfo = now.tzinfo
+        iana = str(tzinfo) if tzinfo is not None else ""
+        zone = iana or tzname or "local"
+        stamp = now.strftime("%A, %B %d %Y, %H:%M")
+        return f"[Current date & time: {stamp} ({zone})]"
+    except Exception:
+        return None
+
+
 def run_conversation(
     agent,
     user_message: str,
@@ -953,6 +988,13 @@ def run_conversation(
             # never mutated, so nothing leaks into session persistence.
             if idx == current_turn_user_idx and msg.get("role") == "user":
                 _injections = []
+                # Per-turn wall clock (date + time + zone). Injected here —
+                # into the current user message, NOT the cached system prompt
+                # — so the model always knows the current time without busting
+                # the byte-stable system-prompt cache prefix.
+                _time_note = _build_current_time_note()
+                if _time_note:
+                    _injections.append(_time_note)
                 if _ext_prefetch_cache:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:

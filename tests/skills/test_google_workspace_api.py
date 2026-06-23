@@ -229,6 +229,139 @@ def test_api_calendar_list_respects_date_range(api_module):
     assert params["timeMax"] == "2026-04-07T23:59:59Z"
 
 
+# ---------------------------------------------------------------------------
+# Bug A — bare calendar date (YYYY-MM-DD) must expand to a full RFC3339
+# instant in the configured timezone so Google Calendar stops returning 400.
+# ---------------------------------------------------------------------------
+
+
+def test_api_calendar_list_expands_bare_dates_to_rfc3339(api_module, monkeypatch):
+    """A bare --start/--end date is expanded to a full RFC3339 instant.
+
+    Previously a bare ``2026-06-23`` was forwarded verbatim, which is not
+    RFC3339, so Google Calendar replied ``error[api]: Bad Request`` (HTTP
+    400). The expansion must produce a parseable datetime with an offset.
+    """
+    monkeypatch.setenv("HERMES_TIMEZONE", "Asia/Jerusalem")
+    captured = {}
+
+    def capture_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return MagicMock(returncode=0, stdout="{}", stderr="")
+
+    args = api_module.argparse.Namespace(
+        start="2026-06-23",
+        end="2026-06-23",
+        max=25,
+        calendar="primary",
+        func=api_module.calendar_list,
+    )
+
+    with patch.object(api_module.subprocess, "run", side_effect=capture_run):
+        api_module.calendar_list(args)
+
+    cmd = captured["cmd"]
+    params = json.loads(cmd[cmd.index("--params") + 1])
+    time_min = params["timeMin"]
+    time_max = params["timeMax"]
+
+    # No longer a bare date — must carry a time component and an offset.
+    assert "T" in time_min and "T" in time_max
+    assert time_min != "2026-06-23"
+    # START → start of the local day; END → end of the local day.
+    assert time_min.startswith("2026-06-23T00:00:00")
+    assert time_max.startswith("2026-06-23T23:59:59")
+    # Asia/Jerusalem in June is UTC+03:00 (IDT).
+    assert "+03:00" in time_min and "+03:00" in time_max
+    # And both round-trip through the RFC3339 parser Google requires.
+    assert datetime.fromisoformat(time_min).tzinfo is not None
+    assert datetime.fromisoformat(time_max).tzinfo is not None
+
+
+def test_api_calendar_list_keeps_explicit_datetimes_unchanged(api_module):
+    """A full ISO datetime with offset/Z passes through untouched."""
+    captured = {}
+
+    def capture_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return MagicMock(returncode=0, stdout="{}", stderr="")
+
+    args = api_module.argparse.Namespace(
+        start="2026-06-23T09:30:00+03:00",
+        end="2026-06-23T17:00:00Z",
+        max=25,
+        calendar="primary",
+        func=api_module.calendar_list,
+    )
+
+    with patch.object(api_module.subprocess, "run", side_effect=capture_run):
+        api_module.calendar_list(args)
+
+    cmd = captured["cmd"]
+    params = json.loads(cmd[cmd.index("--params") + 1])
+    assert params["timeMin"] == "2026-06-23T09:30:00+03:00"
+    assert params["timeMax"] == "2026-06-23T17:00:00Z"
+
+
+def test_api_calendar_list_rejects_malformed_date(api_module):
+    """A malformed --start fails with a clear error, not a raw Google 400."""
+    args = api_module.argparse.Namespace(
+        start="2026-13-99",  # impossible month/day
+        end="",
+        max=25,
+        calendar="primary",
+        func=api_module.calendar_list,
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        api_module.calendar_list(args)
+    assert exc_info.value.code == 1
+
+
+def test_expand_calendar_bound_uses_default_tz_when_unset(api_module, monkeypatch):
+    """With no HERMES_TIMEZONE and no config, default is Asia/Jerusalem."""
+    monkeypatch.delenv("HERMES_TIMEZONE", raising=False)
+    expanded = api_module._expand_calendar_bound("2026-06-23", is_end=False)
+    assert expanded.startswith("2026-06-23T00:00:00")
+    assert "+03:00" in expanded  # Asia/Jerusalem default, June → IDT
+
+
+# ---------------------------------------------------------------------------
+# Bug C (skill path) — created events must carry the configured local
+# timezone, never a hardcoded UTC, so wall-clock time is preserved.
+# ---------------------------------------------------------------------------
+
+
+def test_api_calendar_create_uses_configured_timezone(api_module, monkeypatch):
+    """calendar create attaches the configured tz to start/end, not UTC."""
+    monkeypatch.setenv("HERMES_TIMEZONE", "Asia/Jerusalem")
+    captured = {}
+
+    def fake_run_gws(parts, *, params=None, body=None):
+        captured["parts"] = parts
+        captured["params"] = params
+        captured["body"] = body
+        return {"id": "evt-syn-1", "summary": body.get("summary", "")}
+
+    api_module._run_gws = fake_run_gws
+    args = api_module.argparse.Namespace(
+        summary="Synthetic Sync",
+        start="2026-06-23T11:00:00+03:00",
+        end="2026-06-23T12:00:00+03:00",
+        location="",
+        description="",
+        attendees="",
+        calendar="primary",
+        func=api_module.calendar_create,
+    )
+
+    api_module.calendar_create(args)
+
+    body = captured["body"]
+    assert body["start"]["timeZone"] == "Asia/Jerusalem"
+    assert body["end"]["timeZone"] == "Asia/Jerusalem"
+    assert body["start"]["timeZone"] != "UTC"
+
+
 @pytest.mark.parametrize(
     "header_names",
     [

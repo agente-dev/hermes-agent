@@ -121,6 +121,82 @@ def test_raw_calendar_body_calls_use_json_flag_not_body(monkeypatch: pytest.Monk
         assert json.loads(argv[argv.index("--json") + 1])
 
 
+def test_create_calendar_event_uses_configured_timezone_not_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Created events must carry the configured local timezone, not UTC.
+
+    Bug C: ``calendar_plugin`` hardcoded ``"timeZone": "UTC"`` for both
+    start and end, so an 11:00 Asia/Jerusalem event was written as 11:00 UTC
+    (3 hours off). The body must now reflect the resolved local zone.
+    """
+    monkeypatch.setenv("HERMES_TIMEZONE", "Asia/Jerusalem")
+    # hermes_time caches the resolved zone; force a fresh read for this test.
+    import hermes_time
+
+    hermes_time._cached_tz = None
+    hermes_time._cached_tz_name = None
+    hermes_time._cache_resolved = False
+
+    captured: dict = {}
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001, ANN003
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout='{"id":"new-evt"}', stderr="",
+        )
+
+    monkeypatch.setenv("AGENTE_GWS_BIN", "/fake/bin/gws")
+    monkeypatch.setattr(cp.subprocess, "run", fake_run)
+
+    cp.create_calendar_event(
+        title="Synthetic Standup",
+        start="2026-06-23T11:00:00+03:00",
+        end="2026-06-23T11:30:00+03:00",
+    )
+
+    argv = captured["cmd"]
+    body = json.loads(argv[argv.index("--json") + 1])
+    assert body["start"]["timeZone"] == "Asia/Jerusalem"
+    assert body["end"]["timeZone"] == "Asia/Jerusalem"
+    assert body["start"]["timeZone"] != "UTC"
+    assert body["end"]["timeZone"] != "UTC"
+
+
+def test_create_calendar_event_timezone_defaults_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no configured tz, events default to Asia/Jerusalem (never UTC)."""
+    monkeypatch.delenv("HERMES_TIMEZONE", raising=False)
+    import hermes_time
+
+    hermes_time._cached_tz = None
+    hermes_time._cached_tz_name = None
+    hermes_time._cache_resolved = False
+
+    captured: dict = {}
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001, ANN003
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout='{"id":"new-evt"}', stderr="",
+        )
+
+    monkeypatch.setenv("AGENTE_GWS_BIN", "/fake/bin/gws")
+    monkeypatch.setattr(cp.subprocess, "run", fake_run)
+
+    cp.create_calendar_event(
+        title="Synthetic Review",
+        start="2026-06-23T14:00:00+03:00",
+        end="2026-06-23T15:00:00+03:00",
+    )
+
+    argv = captured["cmd"]
+    body = json.loads(argv[argv.index("--json") + 1])
+    assert body["start"]["timeZone"] != "UTC"
+    assert body["start"]["timeZone"] == "Asia/Jerusalem"
+
+
 def test_get_calendar_event(fake_gws: Path) -> None:
     event = cp.get_calendar_event(event_id="evt1")
     assert event["id"] == "evt1"

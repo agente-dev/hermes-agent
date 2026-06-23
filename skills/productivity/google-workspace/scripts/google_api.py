@@ -24,12 +24,18 @@ import argparse
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - py<3.9 fallback
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
 
 # Ensure sibling modules (_hermes_home) are importable when run standalone.
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
@@ -41,6 +47,92 @@ from _hermes_home import get_hermes_home
 HERMES_HOME = get_hermes_home()
 TOKEN_PATH = HERMES_HOME / "google_token.json"
 CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
+
+# Default IANA timezone when nothing is configured. Matches the Hermes
+# runtime default (Asia/Jerusalem) so bare calendar dates resolve to the
+# operator's wall-clock day rather than UTC.
+_DEFAULT_TZ_NAME = "Asia/Jerusalem"
+
+# Bare calendar date, e.g. "2026-06-23" (no time component).
+_BARE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _resolve_timezone() -> ZoneInfo:
+    """Resolve the configured IANA timezone for calendar queries / events.
+
+    Mirrors ``hermes_time`` resolution order so this standalone skill script
+    (which may run outside the Hermes process, where ``hermes_time`` is not
+    importable) agrees with the rest of the runtime:
+
+      1. ``HERMES_TIMEZONE`` environment variable
+      2. ``timezone`` key in ``$HERMES_HOME/config.yaml``
+      3. ``_DEFAULT_TZ_NAME`` (Asia/Jerusalem)
+
+    Any invalid value falls back to the default rather than crashing — a bad
+    timezone string must never turn a calendar query into a hard error.
+    """
+    candidates = []
+
+    tz_env = os.getenv("HERMES_TIMEZONE", "").strip()
+    if tz_env:
+        candidates.append(tz_env)
+
+    try:
+        import yaml
+
+        config_path = HERMES_HOME / "config.yaml"
+        if config_path.exists():
+            with open(config_path, encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            tz_cfg = cfg.get("timezone", "")
+            if isinstance(tz_cfg, str) and tz_cfg.strip():
+                candidates.append(tz_cfg.strip())
+    except Exception:
+        pass
+
+    candidates.append(_DEFAULT_TZ_NAME)
+
+    for name in candidates:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            continue
+    # Asia/Jerusalem is shipped with the stdlib tz database; the loop above
+    # virtually always returns. UTC is a last-resort guard.
+    return timezone.utc  # type: ignore[return-value]
+
+
+def _expand_calendar_bound(value: str, *, is_end: bool) -> str:
+    """Expand a ``--start``/``--end`` value into a full RFC3339 instant.
+
+    Google Calendar's ``timeMin``/``timeMax`` require RFC3339 datetimes. A
+    bare calendar date (``YYYY-MM-DD``) is non-RFC3339 and triggers an HTTP
+    400 ("Bad Request"). We expand it in the configured timezone:
+
+      * START  → ``T00:00:00`` (start of that local day)
+      * END    → ``T23:59:59`` (end of that local day)
+
+    with the correct UTC offset attached. Values that already contain a time
+    component ("T") are normalised via ``_datetime_with_timezone`` and
+    otherwise returned unchanged. Empty input is returned as-is.
+    """
+    if not value:
+        return value
+    text = value.strip()
+    if _BARE_DATE_RE.match(text):
+        try:
+            d = datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid calendar date {value!r}: {exc}"
+            ) from exc
+        tz = _resolve_timezone()
+        if is_end:
+            dt = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=tz)
+        else:
+            dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz)
+        return dt.isoformat()
+    return _datetime_with_timezone(text)
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -463,8 +555,29 @@ def gmail_modify(args):
 
 def calendar_list(args):
     now = datetime.now(timezone.utc)
-    time_min = _datetime_with_timezone(args.start or now.isoformat())
-    time_max = _datetime_with_timezone(args.end or (now + timedelta(days=7)).isoformat())
+    try:
+        time_min = (
+            _expand_calendar_bound(args.start, is_end=False)
+            if args.start
+            else _datetime_with_timezone(now.isoformat())
+        )
+        time_max = (
+            _expand_calendar_bound(args.end, is_end=True)
+            if args.end
+            else _datetime_with_timezone((now + timedelta(days=7)).isoformat())
+        )
+    except ValueError as exc:
+        print(
+            json.dumps({
+                "error": (
+                    f"invalid calendar time range: {exc}. "
+                    "Use an ISO 8601 datetime (e.g. 2026-06-23T09:00:00Z) "
+                    "or a bare date (2026-06-23)."
+                )
+            }),
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if _gws_binary():
         results = _run_gws(
@@ -516,10 +629,28 @@ def calendar_list(args):
 
 
 def calendar_create(args):
+    tz_name = str(_resolve_timezone())
+    try:
+        start_dt = _expand_calendar_bound(args.start, is_end=False)
+        end_dt = _expand_calendar_bound(args.end, is_end=True)
+    except ValueError as exc:
+        print(
+            json.dumps({
+                "error": (
+                    f"invalid event time: {exc}. Use an ISO 8601 datetime "
+                    "(e.g. 2026-06-23T11:00:00+03:00) or a bare date."
+                )
+            }),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # Send the configured local timezone alongside the dateTime so Google
+    # anchors the event to the operator's wall clock instead of UTC. An
+    # 11:00 Asia/Jerusalem event must not be written as 11:00 UTC.
     event = {
         "summary": args.summary,
-        "start": {"dateTime": args.start},
-        "end": {"dateTime": args.end},
+        "start": {"dateTime": start_dt, "timeZone": tz_name},
+        "end": {"dateTime": end_dt, "timeZone": tz_name},
     }
     if args.location:
         event["location"] = args.location
