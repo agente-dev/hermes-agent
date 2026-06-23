@@ -317,12 +317,61 @@ def test_api_calendar_list_rejects_malformed_date(api_module):
     assert exc_info.value.code == 1
 
 
-def test_expand_calendar_bound_uses_default_tz_when_unset(api_module, monkeypatch):
-    """With no HERMES_TIMEZONE and no config, default is Asia/Jerusalem."""
+def test_expand_calendar_bound_honors_configured_tz(api_module, monkeypatch):
+    """A configured HERMES_TIMEZONE drives the expansion offset."""
+    monkeypatch.setenv("HERMES_TIMEZONE", "America/New_York")
+    expanded = api_module._expand_calendar_bound("2026-06-23", is_end=False)
+    assert expanded.startswith("2026-06-23T00:00:00")
+    assert "-04:00" in expanded  # America/New_York in June → EDT (UTC-4)
+
+
+def test_expand_calendar_bound_falls_back_to_server_local(api_module, monkeypatch):
+    """With nothing configured, expansion uses server-local time (not a
+    hard-coded operator zone). The result is still a valid RFC3339 instant
+    with an offset, never a bare date."""
     monkeypatch.delenv("HERMES_TIMEZONE", raising=False)
     expanded = api_module._expand_calendar_bound("2026-06-23", is_end=False)
     assert expanded.startswith("2026-06-23T00:00:00")
-    assert "+03:00" in expanded  # Asia/Jerusalem default, June → IDT
+    # Must carry an offset (or Z) — i.e. a real RFC3339 instant.
+    parsed = datetime.fromisoformat(expanded)
+    assert parsed.tzinfo is not None
+
+
+def test_api_calendar_create_keeps_offsetless_datetime_local(api_module, monkeypatch):
+    """Offsetless create times must NOT be pinned to UTC (P2 review fix).
+
+    With ``HERMES_TIMEZONE=Asia/Jerusalem`` and ``--start 2026-06-23T11:00:00``
+    (no offset), the dateTime must stay offsetless so Google interprets it in
+    the companion ``timeZone`` — appending ``Z`` would make the 11:00 local
+    event fire at 11:00 UTC (3h off).
+    """
+    monkeypatch.setenv("HERMES_TIMEZONE", "Asia/Jerusalem")
+    captured = {}
+
+    def fake_run_gws(parts, *, params=None, body=None):
+        captured["body"] = body
+        return {"id": "evt-syn-2", "summary": body.get("summary", "")}
+
+    api_module._run_gws = fake_run_gws
+    args = api_module.argparse.Namespace(
+        summary="Synthetic Local",
+        start="2026-06-23T11:00:00",  # offsetless
+        end="2026-06-23T12:00:00",
+        location="",
+        description="",
+        attendees="",
+        calendar="primary",
+        func=api_module.calendar_create,
+    )
+
+    api_module.calendar_create(args)
+
+    body = captured["body"]
+    # Offsetless dateTime preserved (no trailing Z), tz carried separately.
+    assert body["start"]["dateTime"] == "2026-06-23T11:00:00"
+    assert not body["start"]["dateTime"].endswith("Z")
+    assert body["start"]["timeZone"] == "Asia/Jerusalem"
+    assert body["end"]["dateTime"] == "2026-06-23T12:00:00"
 
 
 # ---------------------------------------------------------------------------

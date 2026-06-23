@@ -39,14 +39,18 @@ _SECRET_ENV_KEYS = {"GOOGLE_WORKSPACE_CLI_CLIENT_SECRET"}
 
 
 def _event_timezone() -> str:
-    """Resolve the IANA timezone name to attach to created events.
+    """Resolve the timezone NAME to attach to created events' ``timeZone``.
 
     Uses the shared ``hermes_time`` clock (``HERMES_TIMEZONE`` env →
-    ``config.yaml`` → server local). Falls back to ``Asia/Jerusalem`` — the
-    Hermes runtime default — when nothing is configured, so an 11:00 local
-    event is never silently written as 11:00 UTC. Any failure degrades to the
-    default rather than raising.
+    ``config.yaml`` → server local), mirroring its resolution exactly — when
+    nothing is configured we use the *server-local* zone, NOT a hard-coded
+    operator timezone. This still keeps an 11:00 local event from being
+    silently written as 11:00 UTC, while an unconfigured America/New_York host
+    correctly resolves to its own zone. Any failure degrades to UTC rather
+    than raising.
     """
+    from datetime import datetime, timezone as _dt_timezone
+
     try:
         from hermes_time import get_timezone
 
@@ -55,7 +59,9 @@ def _event_timezone() -> str:
             return str(tz)
     except Exception:
         pass
-    return "Asia/Jerusalem"
+    # hermes_time returns None when unconfigured → server-local time.
+    local = datetime.now().astimezone().tzinfo
+    return str(local) if local is not None else str(_dt_timezone.utc)
 
 
 def _gws_bin() -> str:

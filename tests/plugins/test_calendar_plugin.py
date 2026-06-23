@@ -163,10 +163,13 @@ def test_create_calendar_event_uses_configured_timezone_not_utc(
     assert body["end"]["timeZone"] != "UTC"
 
 
-def test_create_calendar_event_timezone_defaults_when_unconfigured(
+def test_create_calendar_event_timezone_falls_back_to_server_local(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With no configured tz, events default to Asia/Jerusalem (never UTC)."""
+    """With no configured tz, events use the server-local zone — NOT a
+    hard-coded operator timezone. The key contract is that a real zone name
+    is attached (never empty), mirroring hermes_time's server-local fallback.
+    """
     monkeypatch.delenv("HERMES_TIMEZONE", raising=False)
     import hermes_time
 
@@ -193,8 +196,43 @@ def test_create_calendar_event_timezone_defaults_when_unconfigured(
 
     argv = captured["cmd"]
     body = json.loads(argv[argv.index("--json") + 1])
+    # A concrete zone is attached (server-local), never empty.
+    assert body["start"]["timeZone"]
+    assert body["end"]["timeZone"]
+
+
+def test_create_calendar_event_honors_configured_non_jerusalem_tz(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured non-Jerusalem zone is attached verbatim (no hard-code)."""
+    monkeypatch.setenv("HERMES_TIMEZONE", "America/New_York")
+    import hermes_time
+
+    hermes_time._cached_tz = None
+    hermes_time._cached_tz_name = None
+    hermes_time._cache_resolved = False
+
+    captured: dict = {}
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001, ANN003
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout='{"id":"new-evt"}', stderr="",
+        )
+
+    monkeypatch.setenv("AGENTE_GWS_BIN", "/fake/bin/gws")
+    monkeypatch.setattr(cp.subprocess, "run", fake_run)
+
+    cp.create_calendar_event(
+        title="Synthetic NYC",
+        start="2026-06-23T09:00:00-04:00",
+        end="2026-06-23T10:00:00-04:00",
+    )
+
+    argv = captured["cmd"]
+    body = json.loads(argv[argv.index("--json") + 1])
+    assert body["start"]["timeZone"] == "America/New_York"
     assert body["start"]["timeZone"] != "UTC"
-    assert body["start"]["timeZone"] == "Asia/Jerusalem"
 
 
 def test_get_calendar_event(fake_gws: Path) -> None:

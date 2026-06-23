@@ -19,6 +19,15 @@ import pytest
 
 from agent.conversation_loop import _build_current_time_note
 
+# Import the modules that bind ``from hermes_time import now`` at *module*
+# load time eagerly, BEFORE any test patches ``hermes_time.now``. If they were
+# first imported lazily while ``hermes_time.now`` is patched (e.g. transitively
+# via build_system_prompt_parts → run_agent → cron.jobs), their ``_hermes_now``
+# alias would permanently capture the mock and leak a frozen clock into
+# unrelated tests (cron due-job tests). Eager import here pins the real fn.
+import cron.jobs  # noqa: E402,F401
+import run_agent  # noqa: E402,F401
+
 
 def _patch_now(monkeypatch, dt):
     """Force hermes_time.now() (imported lazily inside the helper) to return dt."""

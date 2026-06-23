@@ -35,7 +35,7 @@ from pathlib import Path
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover - py<3.9 fallback
-    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+    from backports.zoneinfo import ZoneInfo  # type: ignore[import-not-found, no-redef]
 
 # Ensure sibling modules (_hermes_home) are importable when run standalone.
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
@@ -48,34 +48,34 @@ HERMES_HOME = get_hermes_home()
 TOKEN_PATH = HERMES_HOME / "google_token.json"
 CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
 
-# Default IANA timezone when nothing is configured. Matches the Hermes
-# runtime default (Asia/Jerusalem) so bare calendar dates resolve to the
-# operator's wall-clock day rather than UTC.
-_DEFAULT_TZ_NAME = "Asia/Jerusalem"
-
 # Bare calendar date, e.g. "2026-06-23" (no time component).
 _BARE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def _resolve_timezone() -> ZoneInfo:
-    """Resolve the configured IANA timezone for calendar queries / events.
+def _resolve_tzinfo():
+    """Resolve the configured timezone for calendar queries / events.
 
-    Mirrors ``hermes_time`` resolution order so this standalone skill script
+    Mirrors ``hermes_time`` resolution order — including its *server-local*
+    fallback when nothing is configured — so this standalone skill script
     (which may run outside the Hermes process, where ``hermes_time`` is not
     importable) agrees with the rest of the runtime:
 
       1. ``HERMES_TIMEZONE`` environment variable
       2. ``timezone`` key in ``$HERMES_HOME/config.yaml``
-      3. ``_DEFAULT_TZ_NAME`` (Asia/Jerusalem)
+      3. server-local time (``datetime.now().astimezone().tzinfo``)
 
-    Any invalid value falls back to the default rather than crashing — a bad
-    timezone string must never turn a calendar query into a hard error.
+    Returns a ``tzinfo``. A bad/invalid configured value degrades to
+    server-local rather than crashing — a calendar query must never become a
+    hard error over a timezone string. The result is never a hard-coded
+    operator timezone: an unconfigured America/New_York host resolves to its
+    own local zone, not Jerusalem.
     """
-    candidates = []
-
     tz_env = os.getenv("HERMES_TIMEZONE", "").strip()
     if tz_env:
-        candidates.append(tz_env)
+        try:
+            return ZoneInfo(tz_env)
+        except Exception:
+            pass
 
     try:
         import yaml
@@ -86,23 +86,34 @@ def _resolve_timezone() -> ZoneInfo:
                 cfg = yaml.safe_load(f) or {}
             tz_cfg = cfg.get("timezone", "")
             if isinstance(tz_cfg, str) and tz_cfg.strip():
-                candidates.append(tz_cfg.strip())
+                try:
+                    return ZoneInfo(tz_cfg.strip())
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    candidates.append(_DEFAULT_TZ_NAME)
-
-    for name in candidates:
-        try:
-            return ZoneInfo(name)
-        except Exception:
-            continue
-    # Asia/Jerusalem is shipped with the stdlib tz database; the loop above
-    # virtually always returns. UTC is a last-resort guard.
-    return timezone.utc  # type: ignore[return-value]
+    # Nothing configured (or invalid) — use server-local time, matching
+    # hermes_time.get_timezone() returning None → datetime.now().astimezone().
+    local = datetime.now().astimezone().tzinfo
+    return local if local is not None else timezone.utc
 
 
-def _expand_calendar_bound(value: str, *, is_end: bool) -> str:
+def _resolve_timezone_name() -> str:
+    """Return the IANA/zone NAME to attach to created events' ``timeZone``.
+
+    Uses the same resolution as :func:`_resolve_tzinfo`. For configured IANA
+    zones this is the canonical name (e.g. ``Asia/Jerusalem``); for the
+    server-local fallback it is the best-available zone label.
+    """
+    tzinfo = _resolve_tzinfo()
+    name = str(tzinfo)
+    # ``ZoneInfo`` stringifies to its IANA key; a server-local fallback may
+    # stringify to an abbreviation/offset, which Google still accepts.
+    return name
+
+
+def _expand_calendar_bound(value: str, *, is_end: bool, anchor_offsetless: bool = True) -> str:
     """Expand a ``--start``/``--end`` value into a full RFC3339 instant.
 
     Google Calendar's ``timeMin``/``timeMax`` require RFC3339 datetimes. A
@@ -112,9 +123,20 @@ def _expand_calendar_bound(value: str, *, is_end: bool) -> str:
       * START  → ``T00:00:00`` (start of that local day)
       * END    → ``T23:59:59`` (end of that local day)
 
-    with the correct UTC offset attached. Values that already contain a time
-    component ("T") are normalised via ``_datetime_with_timezone`` and
-    otherwise returned unchanged. Empty input is returned as-is.
+    with the correct UTC offset attached.
+
+    Values that already contain a time component ("T"):
+
+      * When ``anchor_offsetless`` is True (list/query path, no companion
+        ``timeZone`` field) an offsetless datetime is anchored to UTC via
+        ``_datetime_with_timezone`` so the query is valid RFC3339.
+      * When ``anchor_offsetless`` is False (create path, which supplies a
+        companion ``timeZone``) an offsetless datetime is returned UNCHANGED
+        so Google interprets it in that ``timeZone`` — appending ``Z`` here
+        would silently pin a local ``11:00`` to ``11:00Z`` (UTC) and create
+        the event hours off.
+
+    Empty input is returned as-is.
     """
     if not value:
         return value
@@ -126,12 +148,16 @@ def _expand_calendar_bound(value: str, *, is_end: bool) -> str:
             raise ValueError(
                 f"invalid calendar date {value!r}: {exc}"
             ) from exc
-        tz = _resolve_timezone()
+        tz = _resolve_tzinfo()
         if is_end:
             dt = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=tz)
         else:
             dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz)
         return dt.isoformat()
+    if not anchor_offsetless:
+        # Create path: keep offsetless datetimes intact; the body's
+        # ``timeZone`` localizes them. Already-offset/Z values pass through.
+        return text
     return _datetime_with_timezone(text)
 
 SCOPES = [
@@ -629,10 +655,13 @@ def calendar_list(args):
 
 
 def calendar_create(args):
-    tz_name = str(_resolve_timezone())
+    tz_name = _resolve_timezone_name()
     try:
-        start_dt = _expand_calendar_bound(args.start, is_end=False)
-        end_dt = _expand_calendar_bound(args.end, is_end=True)
+        # anchor_offsetless=False: a bare "11:00:00" (no offset) must NOT be
+        # pinned to UTC — the body's timeZone localizes it. Bare dates still
+        # expand; offset/Z datetimes pass through unchanged.
+        start_dt = _expand_calendar_bound(args.start, is_end=False, anchor_offsetless=False)
+        end_dt = _expand_calendar_bound(args.end, is_end=True, anchor_offsetless=False)
     except ValueError as exc:
         print(
             json.dumps({
