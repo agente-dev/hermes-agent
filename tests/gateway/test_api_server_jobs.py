@@ -115,20 +115,120 @@ class TestListJobs:
                 assert resp.status == 200
                 mock_list.assert_called_once_with(include_disabled=True)
 
+    # Synthetic job fixtures covering each enabled/state combination the
+    # default list must distinguish. Synthetic data only — no real PII.
+    _ACTIVE_JOB = {**SAMPLE_JOB}
+    _PAUSED_JOB = {
+        "id": "ddeeff001122",
+        "name": "synthetic-paused-routine",
+        "schedule": "0 9 * * *",
+        "prompt": "synthetic prompt",
+        "deliver": "local",
+        "enabled": False,
+        "state": "paused",
+        "last_status": "ok",
+    }
+    _COMPLETED_JOB = {
+        "id": "112233445566",
+        "name": "synthetic-completed-oneshot",
+        "schedule": "at 2030-01-01T00:00:00",
+        "prompt": "synthetic prompt",
+        "deliver": "local",
+        "enabled": False,
+        "state": "completed",
+        "last_status": "ok",
+    }
+
+    @staticmethod
+    def _fake_cron_list(jobs):
+        """Build a _cron_list stand-in that mirrors cron.jobs.list_jobs:
+        disabled (enabled=False) jobs are only returned with include_disabled.
+        """
+        def _inner(include_disabled=False):
+            out = list(jobs)
+            if not include_disabled:
+                out = [j for j in out if j.get("enabled", True)]
+            return out
+        return _inner
+
     @pytest.mark.asyncio
-    async def test_list_jobs_default_excludes_disabled(self, adapter):
-        """GET /api/jobs without flag passes include_disabled=False."""
+    async def test_list_jobs_default_includes_paused(self, adapter):
+        """GET /api/jobs (no flag) returns paused routines with their status.
+
+        Regression guard for agente-desktop #155: pausing a routine sets
+        enabled=False / state="paused", and the desktop re-fetches
+        GET /api/jobs with no query param. The paused routine must stay in the
+        default list AND keep enabled=False / state="paused" so the client
+        normalizer can render a paused card with a resume button.
+        """
         app = _create_app(adapter)
-        mock_list = MagicMock(return_value=[])
+        fake = self._fake_cron_list([self._ACTIVE_JOB, self._PAUSED_JOB])
         async with TestClient(TestServer(app)) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
-                f"{_MOD}._cron_list", mock_list
+                f"{_MOD}._cron_list", side_effect=fake
             ):
                 resp = await cli.get("/api/jobs")
                 assert resp.status == 200
-                mock_list.assert_called_once_with(include_disabled=False)
+                data = await resp.json()
+                ids = {j["id"] for j in data["jobs"]}
+                assert self._PAUSED_JOB["id"] in ids, "paused job must be in default list"
+                assert self._ACTIVE_JOB["id"] in ids
+                returned = next(j for j in data["jobs"] if j["id"] == self._PAUSED_JOB["id"])
+                assert returned["enabled"] is False
+                assert returned["state"] == "paused"
+
+    @pytest.mark.asyncio
+    async def test_list_jobs_default_excludes_completed(self, adapter):
+        """GET /api/jobs (no flag) keeps terminal completed one-shots out.
+
+        A finished one-shot is stored with enabled=False / state="completed".
+        Surfacing paused jobs must NOT also leak completed runs into the
+        ordinary active list (Codex review P2 on PR #87).
+        """
+        app = _create_app(adapter)
+        fake = self._fake_cron_list(
+            [self._ACTIVE_JOB, self._PAUSED_JOB, self._COMPLETED_JOB]
+        )
+        async with TestClient(TestServer(app)) as cli:
+            with patch(
+                f"{_MOD}._CRON_AVAILABLE", True
+            ), patch(
+                f"{_MOD}._cron_list", side_effect=fake
+            ):
+                resp = await cli.get("/api/jobs")
+                assert resp.status == 200
+                data = await resp.json()
+                ids = {j["id"] for j in data["jobs"]}
+                assert self._COMPLETED_JOB["id"] not in ids, (
+                    "completed one-shot must not appear in the default list"
+                )
+                assert self._PAUSED_JOB["id"] in ids
+                assert self._ACTIVE_JOB["id"] in ids
+
+    @pytest.mark.asyncio
+    async def test_list_jobs_include_disabled_returns_completed(self, adapter):
+        """GET /api/jobs?include_disabled=true returns EVERYTHING incl. completed."""
+        app = _create_app(adapter)
+        fake = self._fake_cron_list(
+            [self._ACTIVE_JOB, self._PAUSED_JOB, self._COMPLETED_JOB]
+        )
+        async with TestClient(TestServer(app)) as cli:
+            with patch(
+                f"{_MOD}._CRON_AVAILABLE", True
+            ), patch(
+                f"{_MOD}._cron_list", side_effect=fake
+            ):
+                resp = await cli.get("/api/jobs?include_disabled=true")
+                assert resp.status == 200
+                data = await resp.json()
+                ids = {j["id"] for j in data["jobs"]}
+                assert ids == {
+                    self._ACTIVE_JOB["id"],
+                    self._PAUSED_JOB["id"],
+                    self._COMPLETED_JOB["id"],
+                }
 
 
 # ---------------------------------------------------------------------------

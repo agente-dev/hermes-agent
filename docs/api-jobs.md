@@ -24,7 +24,7 @@ underlying cron subsystem (`_CRON_AVAILABLE`) is not loaded.
 
 | Method   | Path                        | Description                                      |
 |----------|-----------------------------|--------------------------------------------------|
-| `GET`    | `/api/jobs`                 | List all enabled jobs (or all with `?include_disabled=true`) |
+| `GET`    | `/api/jobs`                 | List active + paused jobs (terminal completed one-shots excluded; pass `?include_disabled=true` for those too) |
 | `POST`   | `/api/jobs`                 | Create a new cron job                            |
 | `GET`    | `/api/jobs/{id}`            | Fetch a single job by ID                         |
 | `PATCH`  | `/api/jobs/{id}`            | Update allowed fields on an existing job         |

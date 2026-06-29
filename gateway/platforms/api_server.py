@@ -973,6 +973,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        reasoning_callback=None,
         gateway_session_key: Optional[str] = None,
     ) -> Any:
         """
@@ -1021,6 +1022,7 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
+            reasoning_callback=reasoning_callback,
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
@@ -1939,6 +1941,36 @@ class APIServerAdapter(BasePlatformAdapter):
                         frame["result"] = function_result
                 _stream_q.put(("__tool_progress__", frame))
 
+            # Surface the model's chain-of-thought as a transparency panel.
+            # deepseek-v4-pro returns *structured* ``delta.reasoning_content``
+            # (not inline ``<think>``), which the agent extracts and forwards
+            # via ``reasoning_callback``.  We push it onto the same queue the
+            # SSE writer drains, tagged ``__reasoning__`` so ``_emit`` renders
+            # it as a named ``event: reasoning.step`` frame the desktop
+            # ``emitReasoningFromPayload`` consumer understands.  A stable id
+            # lets the desktop upsert successive deltas into one growing step
+            # rather than spawning a new bubble per token.
+            _reasoning_step_id = f"reasoning-{completion_id}"
+
+            def _on_reasoning(text):
+                if not text:
+                    return
+                _stream_q.put(("__reasoning__", {
+                    "id": _reasoning_step_id,
+                    "reasoning": text,
+                    "status": "active",
+                }))
+
+            # Kill-switch: reasoning is on by default; only a falsey
+            # HERMES_EMIT_REASONING value hides raw chain-of-thought (e.g. to
+            # keep English/technical thinking off a customer surface) without
+            # needing a rebuild.  When off we never register the callback, so
+            # no reasoning frames reach the wire.
+            _emit_reasoning = os.getenv("HERMES_EMIT_REASONING", "1").strip().lower() not in (
+                "0", "false", "no", "off", ""
+            )
+            _reasoning_cb = _on_reasoning if _emit_reasoning else None
+
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
             #
@@ -1956,6 +1988,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 stream_delta_callback=_on_delta,
                 tool_start_callback=_on_tool_start,
                 tool_complete_callback=_on_tool_complete,
+                reasoning_callback=_reasoning_cb,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
             ))
@@ -2138,6 +2171,16 @@ class APIServerAdapter(BasePlatformAdapter):
                     await response.write(
                         f"event: hermes.tool.progress\ndata: {event_data}\n\n".encode()
                     )
+                elif isinstance(item, tuple) and len(item) == 2 and item[0] == "__reasoning__":
+                    # Custom ``event: reasoning.step`` frame carrying the
+                    # model's chain-of-thought.  The desktop's
+                    # ``emitReasoningFromPayload`` reads the ``reasoning``
+                    # body plus ``id``/``status`` to upsert a transparency
+                    # step.  Kept off conversation history like tool progress.
+                    event_data = json.dumps(item[1])
+                    await response.write(
+                        f"event: reasoning.step\ndata: {event_data}\n\n".encode()
+                    )
                 else:
                     content_chunk = {
                         "id": completion_id, "object": "chat.completion.chunk",
@@ -2207,6 +2250,35 @@ class APIServerAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.warning("Agent task %s failed before SSE completion: %s", completion_id, exc)
                 error_payload = _agent_error_payload(exc)
+                await response.write(f"data: {json.dumps(error_payload)}\n\n".encode())
+                error_chunk = {
+                    "id": completion_id, "object": "chat.completion.chunk",
+                    "created": created, "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                    "usage": {
+                        "prompt_tokens": usage.get("input_tokens", 0),
+                        "completion_tokens": usage.get("output_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    },
+                }
+                await response.write(f"data: {json.dumps(error_chunk)}\n\n".encode())
+                await response.write(b"data: [DONE]\n\n")
+                return response
+
+            # Non-exception failed path: the conversation loop returns
+            # {"failed": True, "error": ...} instead of raising for
+            # non-retryable client errors (e.g. a 401 token_invalidated from a
+            # revoked BYOK credential, but also billing/credits exhaustion,
+            # content-policy blocks, rate-limit paths). Without this check the
+            # client would receive only an empty "stop" finish chunk, silently
+            # swallowing the failure and masking it as "no response received".
+            # We key off ``failed`` regardless of ``final_response`` for parity
+            # with the non-streaming path; any assistant text was already sent as
+            # deltas during the loop, and the error chunk carries an empty delta,
+            # so no content is duplicated.
+            if isinstance(result, dict) and result.get("failed"):
+                err_msg = result.get("error") or "Agent run failed"
+                error_payload = _agent_error_payload(RuntimeError(err_msg))
                 await response.write(f"data: {json.dumps(error_payload)}\n\n".encode())
                 error_chunk = {
                     "id": completion_id, "object": "chat.completion.chunk",
@@ -3223,8 +3295,23 @@ class APIServerAdapter(BasePlatformAdapter):
         if cron_err:
             return cron_err
         try:
+            # When ?include_disabled=true is passed, return EVERYTHING
+            # (paused + terminal completed one-shots), preserving the old
+            # explicit-flag behaviour.
             include_disabled = request.query.get("include_disabled", "").lower() in {"true", "1"}
-            jobs = _cron_list(include_disabled=include_disabled)
+            if include_disabled:
+                jobs = _cron_list(include_disabled=True)
+            else:
+                # Default list: include paused jobs so a routine does NOT vanish
+                # after the user pauses it (agente-desktop #155 — pausing sets
+                # enabled=False/state="paused"), but keep terminal "completed"
+                # one-shots out of the ordinary active list so finished runs
+                # don't leak in. Paused jobs keep their real enabled/state/
+                # last_status fields so the client can render a paused card.
+                jobs = [
+                    j for j in _cron_list(include_disabled=True)
+                    if j.get("enabled", True) or j.get("state") == "paused"
+                ]
             return web.json_response({"jobs": jobs})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
@@ -3566,6 +3653,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        reasoning_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
     ) -> tuple:
@@ -3590,6 +3678,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_progress_callback=tool_progress_callback,
                 tool_start_callback=tool_start_callback,
                 tool_complete_callback=tool_complete_callback,
+                reasoning_callback=reasoning_callback,
                 gateway_session_key=gateway_session_key,
             )
             if agent_ref is not None:
