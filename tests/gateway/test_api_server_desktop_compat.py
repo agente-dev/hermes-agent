@@ -122,6 +122,34 @@ def test_tool_invocation_roundtrip(monkeypatch):
     assert json.loads(out) == {"pong": True}
 
 
+def test_proxy_call_exception_returns_hebrew_error(monkeypatch):
+    # The defensive `except Exception` path must carry a customer-facing
+    # `error_he` so a Hebrew user never sees a raw English exception string.
+    monkeypatch.setenv("AGENTE_TOOL_PORT", "12345")
+    monkeypatch.setenv("AGENTE_TOOL_SECRET", "deadbeef" * 4)
+
+    import urllib.request as ureq
+
+    def timeout_urlopen(req, timeout=None):  # noqa: ARG001
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(ureq, "urlopen", timeout_urlopen)
+    res = _proxy_call("browse_connector", {"connector_id": "abc"})
+    assert res["error"] == "agente_tool_exception"
+    assert "timed out" in res["message"].lower()
+    # timeout-specific Hebrew line
+    assert res["error_he"] == "תם הזמן הקצוב לטעינת המקור המחובר. נסה/י שוב עוד רגע."
+
+    def boom_urlopen(req, timeout=None):  # noqa: ARG001
+        raise ValueError("connection refused")
+
+    monkeypatch.setattr(ureq, "urlopen", boom_urlopen)
+    res2 = _proxy_call("browse_connector", {"connector_id": "abc"})
+    assert res2["error"] == "agente_tool_exception"
+    # generic Hebrew line for non-timeout failures
+    assert res2["error_he"] == "אירעה תקלה בעת גישה למקור המחובר. נסה/י שוב."
+
+
 def test_jsonrpc_alias_handling():
     body = {"id": 1, "method": "auth.submit_oauth_code", "params": {"request_id": "r123", "code": "c"}}
     out = jsonrpc_compat._apply_jsonrpc_desktop_aliases(body)
