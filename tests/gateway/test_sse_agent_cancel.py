@@ -181,6 +181,80 @@ class TestSSEAgentCancelOnDisconnect:
 
         asyncio.run(run())
 
+    def test_agent_dict_failed_result_emits_error_frame(self):
+        """Agent returning {"final_response": None, "failed": True, "error": "401..."} must
+        surface as an upstream_auth_failed SSE error frame — not a silent empty stop chunk.
+
+        This is the dict-return path: 401/400 non-retryable errors return a
+        failed dict instead of raising, so the except block never fires.
+        Without the fix the client would receive only a "stop" finish chunk.
+        """
+        adapter = _make_adapter()
+
+        stream_q = queue.Queue()
+        stream_q.put(None)  # No content chunks — empty stream
+
+        async def fake_agent():
+            return (
+                {
+                    "final_response": None,
+                    "failed": True,
+                    "error": "Error code: 401 - {'error': {'code': 'token_invalidated'}}",
+                },
+                {"input_tokens": 5, "output_tokens": 0, "total_tokens": 5},
+            )
+
+        async def run():
+            from aiohttp import web
+
+            agent_task = asyncio.ensure_future(fake_agent())
+            await asyncio.sleep(0)  # Let the coroutine complete
+
+            writes: list[str] = []
+            mock_response = AsyncMock(spec=web.StreamResponse)
+
+            async def write_side_effect(data):
+                writes.append(data.decode() if isinstance(data, bytes) else str(data))
+
+            mock_response.write = AsyncMock(side_effect=write_side_effect)
+            mock_response.prepare = AsyncMock()
+
+            with patch(
+                "gateway.platforms.api_server.web.StreamResponse",
+                return_value=mock_response,
+            ):
+                await adapter._write_sse_chat_completion(
+                    _make_request(), "cmpl-authfail-dict", "gpt-4", 1234567890,
+                    stream_q, agent_task,
+                )
+
+            data_frames = [
+                line.removeprefix("data: ")
+                for chunk in writes
+                for line in chunk.splitlines()
+                if line.startswith("data: ") and line != "data: [DONE]"
+            ]
+            parsed_frames = [json.loads(frame) for frame in data_frames]
+
+            # Must have an upstream_auth_failed error frame
+            assert any(
+                frame.get("error", {}).get("type") == "upstream_auth_failed"
+                and frame.get("error", {}).get("code") == 401
+                for frame in parsed_frames
+            ), f"No upstream_auth_failed frame in: {parsed_frames}"
+
+            # Finish reason must be "error", never "stop"
+            finish_reasons = [
+                choice.get("finish_reason")
+                for frame in parsed_frames
+                for choice in frame.get("choices", [])
+                if choice.get("finish_reason") is not None
+            ]
+            assert "error" in finish_reasons, f"Expected finish_reason=error in {finish_reasons}"
+            assert "stop" not in finish_reasons, f"Unexpected stop in {finish_reasons}"
+
+        asyncio.run(run())
+
     def test_broken_pipe_also_cancels_agent(self):
         """BrokenPipeError (another disconnect variant) also cancels the task."""
         adapter = _make_adapter()
