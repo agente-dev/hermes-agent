@@ -335,3 +335,29 @@ def test_register_wires_all_tools() -> None:
     ]
     for c in calls:
         assert c["toolset"] == "calendar"
+
+
+def test_guard_wrapper_converts_unexpected_exception_to_hebrew_error() -> None:
+    """An unexpected (non-RuntimeError) crash must become a logged, Hebrew,
+    structured error instead of bubbling as an opaque English tool failure
+    (e.g. AttributeError: 'NoneType' object has no attribute 'strip')."""
+    def _boom(args, **kw):  # noqa: ANN001, ANN003
+        raise AttributeError("'NoneType' object has no attribute 'strip'")
+
+    wrapped = calendar_pkg._guard_calendar_handler("list_calendars", _boom)
+    out = json.loads(wrapped({}))
+    assert out["success"] is False
+    assert out.get("error_he")
+    # Hebrew copy actually contains Hebrew characters (error_he policy).
+    assert any("֐" <= ch <= "ת" for ch in out["error_he"])
+    assert "AttributeError" in out.get("error_detail", "")
+
+
+def test_guard_wrapper_passes_through_handler_result() -> None:
+    """The wrapper must be transparent for normal returns."""
+    def _ok(args, **kw):  # noqa: ANN001, ANN003
+        return calendar_pkg._json({"success": True, "calendars": []})
+
+    wrapped = calendar_pkg._guard_calendar_handler("list_calendars", _ok)
+    out = json.loads(wrapped({}))
+    assert out["success"] is True
