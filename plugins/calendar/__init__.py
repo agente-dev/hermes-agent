@@ -10,6 +10,7 @@ Hebrew/RTL event titles are preserved verbatim.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from typing import Any, Dict
@@ -38,6 +39,41 @@ def _json(obj: Any) -> str:
 
 def _err(msg: str, **extra: Any) -> str:
     return _json({"success": False, "error": msg, **extra})
+
+
+# Customer-facing copy must be Hebrew (error_he policy). The individual handlers
+# already translate the expected failure (a non-zero gws exit → RuntimeError →
+# _err). Any OTHER exception would otherwise bubble to the generic Hermes tool
+# envelope as opaque English (e.g. "AttributeError: 'NoneType' object has no
+# attribute 'strip'"), which both violates the Hebrew-error policy and hides the
+# stack from the user/model. This boundary wrapper logs the FULL traceback for
+# diagnosis and returns a Hebrew, structured error instead of a raw crash.
+_CALENDAR_UNEXPECTED_ERROR_HE = (
+    "אירעה תקלה טכנית בגישה ליומן. נסו שוב; אם הבעיה נמשכת, התנתקו והתחברו "
+    "מחדש לחשבון Google מתוך ההגדרות."
+)
+
+
+def _guard_calendar_handler(name: str, handler: Any) -> Any:
+    """Wrap a calendar handler so an unexpected exception becomes a logged,
+    Hebrew, structured error instead of an opaque English tool crash."""
+
+    @functools.wraps(handler)
+    def wrapped(args: Dict[str, Any], **kw: Any) -> str:
+        try:
+            return handler(args, **kw)
+        except Exception as exc:  # noqa: BLE001 — deliberate catch-all at the tool boundary
+            logger.exception("calendar tool %s raised an unexpected error", name)
+            return _json(
+                {
+                    "success": False,
+                    "error": _CALENDAR_UNEXPECTED_ERROR_HE,
+                    "error_he": _CALENDAR_UNEXPECTED_ERROR_HE,
+                    "error_detail": f"{type(exc).__name__}: {exc}",
+                }
+            )
+
+    return wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +255,7 @@ def register(ctx: Any) -> None:
             name=name,
             toolset="calendar",
             schema=schema,
-            handler=handler,
+            handler=_guard_calendar_handler(name, handler),
             check_fn=check_calendar_requirements,
             emoji=emoji,
         )
