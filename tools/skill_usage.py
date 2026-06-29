@@ -305,7 +305,9 @@ def remove_suppressed_name(skill_name: str) -> None:
         _write_suppressed_names(names)
 
 
-def list_agent_created_skill_names() -> List[str]:
+def list_agent_created_skill_names(
+    managed_packs: Optional[List[str]] = None,
+) -> List[str]:
     """Enumerate skills the curator may manage.
 
     Always includes agent-authored skills (those marked in ``.usage.json`` via
@@ -315,6 +317,11 @@ def list_agent_created_skill_names() -> List[str]:
     sight (see ``apply_automatic_transitions``). Hub-installed skills are never
     included; manually authored skills are not inferred from filesystem
     location.
+
+    ``managed_packs`` is an optional opt-in list of installed (non-agent-
+    created) skill names that should be included as full curation candidates
+    (content-patch + archive eligible), with the same safety guarantees as
+    agent-created skills. Skills in this list bypass the hub/bundled exclusions.
     """
     base = _skills_dir()
     if not base.exists():
@@ -323,6 +330,7 @@ def list_agent_created_skill_names() -> List[str]:
     bundled = _read_bundled_manifest_names()
     prune_builtins = _prune_builtins_enabled()
     usage = load_usage()
+    managed_pack_set: set = set(managed_packs) if managed_packs else set()
 
     names: List[str] = []
     # Top-level SKILL.md files (flat layout) AND nested category/skill/SKILL.md
@@ -335,7 +343,12 @@ def list_agent_created_skill_names() -> List[str]:
         except ValueError:
             continue
         name = _read_skill_name(skill_md, fallback=skill_md.parent.name)
-        # Hub-installed skills are always off-limits.
+        # Managed-packs allowlist takes priority: these skills are treated as
+        # full curation candidates regardless of their origin (bundled or hub).
+        if name in managed_pack_set:
+            names.append(name)
+            continue
+        # Hub-installed skills are always off-limits (unless managed_packs).
         if name in hub:
             continue
         if name in bundled:
@@ -772,7 +785,9 @@ def _find_skill_dir(skill_name: str) -> Optional[Path]:
 # Reporting — for the curator CLI / slash command
 # ---------------------------------------------------------------------------
 
-def agent_created_report() -> List[Dict[str, Any]]:
+def agent_created_report(
+    managed_packs: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Return a list of {name, state, pinned, last_activity_at, ...}
     records for every curator-managed skill. Missing usage records are
     backfilled with defaults so callers can always index fields.
@@ -781,10 +796,13 @@ def agent_created_report() -> List[Dict[str, Any]]:
     ``.usage.json``, False when the row is a fresh backfill (e.g. a built-in
     seen for the first time). The curator uses this to seed the inactivity
     clock instead of treating an unrecorded skill as ancient.
+
+    ``managed_packs`` is forwarded to ``list_agent_created_skill_names`` to
+    include opt-in installed skills as full curation candidates.
     """
     data = load_usage()
     rows: List[Dict[str, Any]] = []
-    for name in list_agent_created_skill_names():
+    for name in list_agent_created_skill_names(managed_packs=managed_packs):
         raw = data.get(name)
         persisted = isinstance(raw, dict)
         rec: Dict[str, Any] = raw if isinstance(raw, dict) else _empty_record()
