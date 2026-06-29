@@ -2265,6 +2265,35 @@ class APIServerAdapter(BasePlatformAdapter):
                 await response.write(b"data: [DONE]\n\n")
                 return response
 
+            # Non-exception failed path: the conversation loop returns
+            # {"failed": True, "error": ...} instead of raising for
+            # non-retryable client errors (e.g. a 401 token_invalidated from a
+            # revoked BYOK credential, but also billing/credits exhaustion,
+            # content-policy blocks, rate-limit paths). Without this check the
+            # client would receive only an empty "stop" finish chunk, silently
+            # swallowing the failure and masking it as "no response received".
+            # We key off ``failed`` regardless of ``final_response`` for parity
+            # with the non-streaming path; any assistant text was already sent as
+            # deltas during the loop, and the error chunk carries an empty delta,
+            # so no content is duplicated.
+            if isinstance(result, dict) and result.get("failed"):
+                err_msg = result.get("error") or "Agent run failed"
+                error_payload = _agent_error_payload(RuntimeError(err_msg))
+                await response.write(f"data: {json.dumps(error_payload)}\n\n".encode())
+                error_chunk = {
+                    "id": completion_id, "object": "chat.completion.chunk",
+                    "created": created, "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                    "usage": {
+                        "prompt_tokens": usage.get("input_tokens", 0),
+                        "completion_tokens": usage.get("output_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    },
+                }
+                await response.write(f"data: {json.dumps(error_chunk)}\n\n".encode())
+                await response.write(b"data: [DONE]\n\n")
+                return response
+
             # Finish chunk
             finish_chunk = {
                 "id": completion_id, "object": "chat.completion.chunk",
