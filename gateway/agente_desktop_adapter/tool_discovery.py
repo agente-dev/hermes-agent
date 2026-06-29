@@ -32,7 +32,12 @@ logger = logging.getLogger(__name__)
 # --- preserved exact IPC bridge (from plugins/agente_desktop/__init__.py) ---
 
 TOOLSET = "agente-desktop"
-_REQUEST_TIMEOUT_SECONDS = 25
+# This socket timeout must exceed the desktop IPC server budget
+# (ipc-server.ts SERVER_TIMEOUT_MS = 25000) plus the agent-browser command
+# time, so the Python clock is never the one that fires first. At 25s it
+# equalled the IPC budget exactly (zero headroom); 40s gives the desktop
+# side room to time out and return its own (Hebrew-aware) error first.
+_REQUEST_TIMEOUT_SECONDS = 40
 
 _TOOL_EMOJIS: dict[str, str] = {
     "list_whatsapp_accounts": "📱",
@@ -1361,7 +1366,17 @@ def _proxy_call(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
             "body": exc.read().decode("utf-8", "replace"),
         }
     except Exception as exc:  # noqa: BLE001 — defensive; never raise from a tool handler
-        return {"error": "agente_tool_exception", "message": str(exc)}
+        message = str(exc)
+        lowered = message.lower()
+        if "timed out" in lowered or "timeout" in lowered:
+            error_he = "תם הזמן הקצוב לטעינת המקור המחובר. נסה/י שוב עוד רגע."
+        else:
+            error_he = "אירעה תקלה בעת גישה למקור המחובר. נסה/י שוב."
+        return {
+            "error": "agente_tool_exception",
+            "message": message,
+            "error_he": error_he,
+        }
 
     try:
         envelope = json.loads(body)

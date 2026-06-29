@@ -38,6 +38,32 @@ _SAFE_CHILD_ENV_KEYS = (
 _SECRET_ENV_KEYS = {"GOOGLE_WORKSPACE_CLI_CLIENT_SECRET"}
 
 
+def _event_timezone() -> str:
+    """Resolve the timezone NAME to attach to created events' ``timeZone``.
+
+    Uses the shared ``hermes_time`` clock (``HERMES_TIMEZONE`` env →
+    ``config.yaml`` → server local), mirroring its resolution exactly — when
+    nothing is configured we use the *server-local* zone, NOT a hard-coded
+    operator timezone. This still keeps an 11:00 local event from being
+    silently written as 11:00 UTC, while an unconfigured America/New_York host
+    correctly resolves to its own zone. Any failure degrades to UTC rather
+    than raising.
+    """
+    from datetime import datetime, timezone as _dt_timezone
+
+    try:
+        from hermes_time import get_timezone
+
+        tz = get_timezone()
+        if tz is not None:
+            return str(tz)
+    except Exception:
+        pass
+    # hermes_time returns None when unconfigured → server-local time.
+    local = datetime.now().astimezone().tzinfo
+    return str(local) if local is not None else str(_dt_timezone.utc)
+
+
 def _gws_bin() -> str:
     """Resolve the gws binary path. Env wins, PATH fallback for dev."""
     explicit = os.environ.get("AG""ENTE_GWS_BIN")
@@ -148,10 +174,11 @@ def create_calendar_event(
     description: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new event. Returns the created event dict from gws."""
+    event_tz = _event_timezone()
     body: Dict[str, Any] = {
         "summary": title,
-        "start": {"dateTime": start, "timeZone": "UTC"},
-        "end": {"dateTime": end, "timeZone": "UTC"},
+        "start": {"dateTime": start, "timeZone": event_tz},
+        "end": {"dateTime": end, "timeZone": event_tz},
     }
     if attendees:
         body["attendees"] = [{"email": a} for a in attendees]

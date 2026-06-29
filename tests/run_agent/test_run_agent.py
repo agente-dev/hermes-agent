@@ -3375,7 +3375,17 @@ class TestRunConversation:
         ]
         assert all("message_count" in c and isinstance(c.get("request_messages"), list) for c in pre_request_calls)
         assert all("request" in c and "messages" in c["request"]["body"] for c in pre_request_calls)
-        assert any(msg.get("role") == "user" and msg.get("content") == "search something" for msg in pre_request_calls[0]["request_messages"])
+        # The original user text is always the prefix of the request message;
+        # ephemeral per-turn context (current-time note, memory recall, plugin
+        # context) may be appended after a blank line. Match the prefix rather
+        # than exact-equality so legitimate augmentation doesn't break the hook
+        # assertion.
+        assert any(
+            msg.get("role") == "user"
+            and isinstance(msg.get("content"), str)
+            and msg["content"].startswith("search something")
+            for msg in pre_request_calls[0]["request_messages"]
+        )
         assert all("usage" in c and "response" in c for c in post_request_calls)
         assert all("assistant_message" in c["response"] for c in post_request_calls)
 

@@ -337,6 +337,38 @@ class TestAdapterInit:
         assert isinstance(agent, FakeAgent)
         assert captured["reasoning_config"] == {"enabled": True, "effort": "xhigh"}
 
+    def test_create_agent_forwards_reasoning_callback(self, monkeypatch):
+        """``reasoning_callback`` must reach the AIAgent so the streaming
+        chat-completions handler can surface chain-of-thought."""
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {"provider": "openai", "base_url": "https://example.test/v1"},
+        )
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "gpt-5.5")
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._load_reasoning_config",
+            staticmethod(lambda: {}),
+        )
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+
+        sentinel = lambda _text: None
+        agent = adapter._create_agent(session_id="api-session", reasoning_callback=sentinel)
+
+        assert isinstance(agent, FakeAgent)
+        assert captured["reasoning_callback"] is sentinel
+
 
 # ---------------------------------------------------------------------------
 # Auth checking
@@ -1410,6 +1442,118 @@ class TestChatCompletionsEndpoint:
             assert "call_orphan_1" not in body
             assert '"status": "running"' not in body
             assert '"status": "completed"' not in body
+
+    @pytest.mark.asyncio
+    async def test_stream_includes_reasoning_step(self, adapter):
+        """reasoning_callback fires → chain-of-thought appears as a custom
+        ``event: reasoning.step`` SSE frame, not in delta.content.
+
+        deepseek-v4-pro returns structured ``delta.reasoning_content`` which
+        the agent forwards via ``reasoning_callback``; the gateway must relay
+        it on a named SSE event the desktop ``emitReasoningFromPayload``
+        consumer understands (``reasoning`` body + ``id`` + ``status``).
+        """
+        import asyncio
+        import json as _json
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                cb = kwargs.get("stream_delta_callback")
+                rcb = kwargs.get("reasoning_callback")
+                if rcb:
+                    rcb("Let me check the client's recent messages")
+                if cb:
+                    await asyncio.sleep(0.05)
+                    cb("Done.")
+                return (
+                    {"final_response": "Done.", "messages": [], "api_calls": 1},
+                    {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "check messages"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+                assert "[DONE]" in body
+                # Reasoning must appear as a custom SSE event, never inside
+                # a chat.completion.chunk delta.content field.
+                assert "event: reasoning.step" in body
+                # The data body must carry the fields emitReasoningFromPayload
+                # reads: a ``reasoning`` body, a stable ``id`` (so deltas
+                # upsert into one step), and a ``status`` it normalizes.
+                reasoning_payloads = []
+                for line in body.splitlines():
+                    if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                        try:
+                            chunk = _json.loads(line[len("data: "):])
+                        except _json.JSONDecodeError:
+                            continue
+                        if isinstance(chunk, dict) and "reasoning" in chunk:
+                            reasoning_payloads.append(chunk)
+                        # Reasoning text must never leak into assistant content.
+                        if chunk.get("object") == "chat.completion.chunk":
+                            for choice in chunk.get("choices", []):
+                                content = choice.get("delta", {}).get("content", "")
+                                assert "check the client's recent messages" not in content
+                assert len(reasoning_payloads) == 1
+                payload = reasoning_payloads[0]
+                assert payload["reasoning"] == "Let me check the client's recent messages"
+                assert payload["id"]
+                assert payload["status"] == "active"
+                # Final assistant content must still be present.
+                assert "Done." in body
+
+    @pytest.mark.asyncio
+    async def test_stream_reasoning_disabled_by_kill_switch(self, adapter, monkeypatch):
+        """HERMES_EMIT_REASONING=0 → no reasoning_callback is registered, so
+        no ``reasoning.step`` frame reaches the wire even when the agent fires
+        reasoning deltas."""
+        import asyncio
+
+        monkeypatch.setenv("HERMES_EMIT_REASONING", "0")
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            saw_reasoning_cb = {"value": None}
+
+            async def _mock_run_agent(**kwargs):
+                cb = kwargs.get("stream_delta_callback")
+                rcb = kwargs.get("reasoning_callback")
+                saw_reasoning_cb["value"] = rcb
+                if rcb:
+                    rcb("This should never reach the wire")
+                if cb:
+                    await asyncio.sleep(0.05)
+                    cb("Done.")
+                return (
+                    {"final_response": "Done.", "messages": [], "api_calls": 1},
+                    {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "check messages"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+                # Kill-switch off ⇒ callback never registered ⇒ no frame.
+                assert saw_reasoning_cb["value"] is None
+                assert "event: reasoning.step" not in body
+                assert "This should never reach the wire" not in body
+                assert "Done." in body
 
     @pytest.mark.asyncio
     async def test_no_user_message_returns_400(self, adapter):
