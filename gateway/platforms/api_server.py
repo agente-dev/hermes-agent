@@ -2268,10 +2268,15 @@ class APIServerAdapter(BasePlatformAdapter):
             # Non-exception failed path: the conversation loop returns
             # {"failed": True, "error": ...} instead of raising for
             # non-retryable client errors (e.g. a 401 token_invalidated from a
-            # revoked BYOK credential). Without this check the client would
-            # receive only an empty "stop" finish chunk, silently swallowing the
-            # auth failure and masking it as "no response received".
-            if isinstance(result, dict) and result.get("failed") and not result.get("final_response"):
+            # revoked BYOK credential, but also billing/credits exhaustion,
+            # content-policy blocks, rate-limit paths). Without this check the
+            # client would receive only an empty "stop" finish chunk, silently
+            # swallowing the failure and masking it as "no response received".
+            # We key off ``failed`` regardless of ``final_response`` for parity
+            # with the non-streaming path; any assistant text was already sent as
+            # deltas during the loop, and the error chunk carries an empty delta,
+            # so no content is duplicated.
+            if isinstance(result, dict) and result.get("failed"):
                 err_msg = result.get("error") or "Agent run failed"
                 error_payload = _agent_error_payload(RuntimeError(err_msg))
                 await response.write(f"data: {json.dumps(error_payload)}\n\n".encode())

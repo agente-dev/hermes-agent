@@ -255,6 +255,76 @@ class TestSSEAgentCancelOnDisconnect:
 
         asyncio.run(run())
 
+    def test_failed_result_with_final_response_still_emits_error_frame(self):
+        """A failed result that ALSO carries a diagnostic final_response (e.g.
+        billing/credits exhausted, content-policy block, rate-limit) must still
+        surface as an error frame — keying off ``failed`` regardless of
+        ``final_response``, matching the non-streaming path. The error chunk
+        carries an empty delta so already-streamed content is not duplicated.
+        """
+        adapter = _make_adapter()
+
+        stream_q = queue.Queue()
+        stream_q.put(None)  # No content chunks
+
+        async def fake_agent():
+            return (
+                {
+                    "final_response": "You have exhausted your monthly credits.",
+                    "failed": True,
+                    "error": "Billing hard limit reached",
+                },
+                {"input_tokens": 7, "output_tokens": 9, "total_tokens": 16},
+            )
+
+        async def run():
+            from aiohttp import web
+
+            agent_task = asyncio.ensure_future(fake_agent())
+            await asyncio.sleep(0)
+
+            writes: list[str] = []
+            mock_response = AsyncMock(spec=web.StreamResponse)
+
+            async def write_side_effect(data):
+                writes.append(data.decode() if isinstance(data, bytes) else str(data))
+
+            mock_response.write = AsyncMock(side_effect=write_side_effect)
+            mock_response.prepare = AsyncMock()
+
+            with patch(
+                "gateway.platforms.api_server.web.StreamResponse",
+                return_value=mock_response,
+            ):
+                await adapter._write_sse_chat_completion(
+                    _make_request(), "cmpl-failed-with-text", "gpt-4", 1234567890,
+                    stream_q, agent_task,
+                )
+
+            parsed_frames = [
+                json.loads(line.removeprefix("data: "))
+                for chunk in writes
+                for line in chunk.splitlines()
+                if line.startswith("data: ") and line != "data: [DONE]"
+            ]
+
+            # Non-auth failure → generic agent error frame is surfaced
+            assert any(
+                frame.get("error", {}).get("code") == "agent_task_failed"
+                for frame in parsed_frames
+            ), f"No agent_task_failed error frame in: {parsed_frames}"
+
+            finish_reasons = [
+                choice.get("finish_reason")
+                for frame in parsed_frames
+                for choice in frame.get("choices", [])
+                if choice.get("finish_reason") is not None
+            ]
+            assert "error" in finish_reasons, f"Expected finish_reason=error in {finish_reasons}"
+            assert "stop" not in finish_reasons, f"Unexpected stop in {finish_reasons}"
+
+        asyncio.run(run())
+
     def test_broken_pipe_also_cancels_agent(self):
         """BrokenPipeError (another disconnect variant) also cancels the task."""
         adapter = _make_adapter()
