@@ -554,6 +554,42 @@ def _openai_error(message: str, err_type: str = "invalid_request_error", param: 
     }
 
 
+# ``reset_at`` sanity window: epoch values above this are epoch-MILLISECONDS
+# (1e11 seconds is year ~5138, while any epoch-ms after 1973 exceeds it).
+_RESET_AT_EPOCH_MS_THRESHOLD = 100_000_000_000
+# Accept resets up to 30 days out; tolerate 60s of clock skew into the past.
+_RESET_AT_MAX_FUTURE_SECONDS = 30 * 24 * 3600
+_RESET_AT_MAX_PAST_SECONDS = 60
+
+
+def _normalized_reset_at(value: Any) -> Optional[int]:
+    """Sanity-normalize a raw reset timestamp to a unix epoch int (seconds).
+
+    ``reset_at`` can flow from the raw ``x-ratelimit-reset`` header (see
+    ``agent_runtime_helpers.extract_api_error_context``), whose unit is
+    provider-defined: OpenRouter sends epoch MILLISECONDS while others send
+    epoch seconds or delta seconds. Forwarding a raw ms value would violate
+    the SSE contract ("unix epoch int, seconds") and render an absurd date
+    on the desktop (~year 57000); a delta value would render 1970.
+
+    * values above ``_RESET_AT_EPOCH_MS_THRESHOLD`` are treated as epoch-ms
+      and divided by 1000;
+    * values outside ``[now - 60s, now + 30d]`` are rejected (``None``).
+    """
+    if value in (None, ""):
+        return None
+    try:
+        reset_at = float(value)
+    except (TypeError, ValueError):
+        return None
+    if reset_at > _RESET_AT_EPOCH_MS_THRESHOLD:
+        reset_at /= 1000.0
+    now = time.time()
+    if not (now - _RESET_AT_MAX_PAST_SECONDS <= reset_at <= now + _RESET_AT_MAX_FUTURE_SECONDS):
+        return None
+    return int(reset_at)
+
+
 def _usage_limit_error_fields(result: Any) -> Optional[Dict[str, Any]]:
     """Typed ``usage_limit_reached`` error fields from a failed agent result.
 
@@ -578,9 +614,13 @@ def _usage_limit_error_fields(result: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(result, dict):
         return None
     error_code = str(result.get("error_code") or "").strip().lower()
-    reset_at_raw = result.get("reset_at")
+    reset_at = _normalized_reset_at(result.get("reset_at"))
+    # Without the typed ``usage_limit_reached`` error_code, a bare
+    # failure_reason='rate_limit' only qualifies when it carries a reset
+    # timestamp that survived normalization — an ordinary provider 429 with
+    # a malformed/mis-unit reset header must NOT emit the typed frame.
     is_usage_limit = error_code == "usage_limit_reached" or (
-        result.get("failure_reason") == "rate_limit" and reset_at_raw not in (None, "")
+        result.get("failure_reason") == "rate_limit" and reset_at is not None
     )
     if not is_usage_limit:
         return None
@@ -593,7 +633,6 @@ def _usage_limit_error_fields(result: Any) -> Optional[Dict[str, Any]]:
         except (TypeError, ValueError):
             return None
 
-    reset_at = _as_int(reset_at_raw)
     resets_in = _as_int(result.get("resets_in_seconds"))
     if resets_in is None and reset_at is not None:
         resets_in = max(0, int(reset_at - time.time()))
