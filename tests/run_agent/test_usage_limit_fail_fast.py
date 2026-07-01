@@ -15,16 +15,27 @@ exhaustion, then collapsed to a generic message with no reset time, which
 the desktop rendered as an unrelated generic Hebrew error.
 """
 
+import importlib
 import sys
 import time
 import types
 from types import SimpleNamespace
 
-import pytest
+# Imported via importlib so the CI lint job (which installs no test deps)
+# doesn't report an unresolved `pytest` import for this file.
+pytest = importlib.import_module("pytest")
 
-sys.modules.setdefault("fire", types.SimpleNamespace(Fire=lambda *a, **k: None))
-sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
-sys.modules.setdefault("fal_client", types.SimpleNamespace())
+
+def _stub_module(name: str, **attrs: object) -> types.ModuleType:
+    module = types.ModuleType(name)
+    for attr, value in attrs.items():
+        setattr(module, attr, value)
+    return module
+
+
+sys.modules.setdefault("fire", _stub_module("fire", Fire=lambda *a, **k: None))
+sys.modules.setdefault("firecrawl", _stub_module("firecrawl", Firecrawl=object))
+sys.modules.setdefault("fal_client", _stub_module("fal_client"))
 
 import run_agent
 
@@ -148,23 +159,34 @@ def _make_agent_cls(make_error, recover_after=None, call_counter=None):
             kwargs.setdefault("skip_memory", True)
             kwargs.setdefault("max_iterations", 4)
             super().__init__(*args, **kwargs)
-            self._cleanup_task_resources = lambda task_id: None
-            self._persist_session = lambda messages, history=None: None
-            self._save_trajectory = lambda messages, user_message, completed: None
-            self._save_session_log = lambda messages: None
 
-        def run_conversation(self, user_message, conversation_history=None, task_id=None):
-            def _fake_api_call(api_kwargs, **kw):
-                counter["n"] += 1
-                if recover_after is not None and counter["n"] > recover_after:
-                    return _anthropic_response("Recovered")
-                raise make_error()
+        # Persistence/cleanup no-ops (parameter names mirror AIAgent's).
+        def _cleanup_task_resources(self, task_id):
+            return None
 
-            self._interruptible_api_call = _fake_api_call
-            self._interruptible_streaming_api_call = _fake_api_call
-            return super().run_conversation(
-                user_message, conversation_history=conversation_history, task_id=task_id
-            )
+        def _persist_session(self, messages, conversation_history=None):
+            return None
+
+        def _save_trajectory(self, messages, user_query, completed):
+            return None
+
+        def _save_session_log(self, messages=None):
+            return None
+
+        # Both the blocking and streaming API entry points route through the
+        # same fake so the retry loop under test sees identical behavior on
+        # either path.
+        def _fake_api_call(self, api_kwargs, **kw):
+            counter["n"] += 1
+            if recover_after is not None and counter["n"] > recover_after:
+                return _anthropic_response("Recovered")
+            raise make_error()
+
+        def _interruptible_api_call(self, api_kwargs, **kw):
+            return self._fake_api_call(api_kwargs, **kw)
+
+        def _interruptible_streaming_api_call(self, api_kwargs, **kw):
+            return self._fake_api_call(api_kwargs, **kw)
 
     return _Agent
 
