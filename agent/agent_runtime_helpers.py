@@ -2221,6 +2221,23 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
             if value not in {None, ""}:
                 context["reset_at"] = value
                 break
+        # ChatGPT-account plan limits (e.g. Codex ``usage_limit_reached``)
+        # carry ``resets_in_seconds`` alongside ``resets_at``. Keep it as a
+        # first-class field so callers can surface "resets in N minutes"
+        # without re-deriving it from wall-clock math, and use it to fill
+        # ``reset_at`` when ``resets_at`` is absent.
+        resets_in = payload.get("resets_in_seconds")
+        if resets_in not in {None, ""}:
+            try:
+                context["resets_in_seconds"] = int(float(resets_in))
+            except (TypeError, ValueError):
+                pass
+            else:
+                if "reset_at" not in context:
+                    context["reset_at"] = time.time() + context["resets_in_seconds"]
+        plan_type = payload.get("plan_type")
+        if isinstance(plan_type, str) and plan_type.strip():
+            context["plan_type"] = plan_type.strip()
         retry_after = payload.get("retry_after")
         if retry_after not in {None, ""} and "reset_at" not in context:
             try:

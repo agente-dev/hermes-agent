@@ -3182,6 +3182,110 @@ class TestChatCompletionsAgentIncomplete:
 
 
 # ---------------------------------------------------------------------------
+# Usage-limit (ChatGPT-account Codex 429) non-streaming parity
+# ---------------------------------------------------------------------------
+
+
+class TestChatCompletionsUsageLimitParity:
+    """Non-streaming /v1/chat/completions must carry the same
+    ``usage_limit_reached`` reset context as the SSE error frame: hermes
+    extras with ``error_code='usage_limit_reached'`` (STRING — never 429),
+    ``reset_at`` / ``resets_in_seconds`` / ``plan_type``, plus an
+    ``X-Hermes-Error-Reset-At`` response header."""
+
+    def _usage_limit_result(self, reset_at: int, final_response=None):
+        return {
+            "final_response": final_response,
+            "completed": False,
+            "partial": False,
+            "failed": True,
+            "error": "HTTP 429: The usage limit has been reached",
+            "failure_reason": "rate_limit",
+            "error_code": "usage_limit_reached",
+            "reset_at": reset_at,
+            "resets_in_seconds": 3600,
+            "plan_type": "pro",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_failed_with_text_carries_usage_limit_extras_and_header(self, adapter):
+        reset_at = int(time.time()) + 3600
+        mock_result = self._usage_limit_result(
+            reset_at,
+            final_response="API call failed after 3 retries: HTTP 429",
+        )
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
+                )
+            assert resp.status == 200
+            data = await resp.json()
+            hermes = data["hermes"]
+            assert hermes["error_code"] == "usage_limit_reached"
+            assert hermes["error_code"] != "429"
+            assert hermes["reset_at"] == reset_at
+            assert hermes["resets_in_seconds"] == 3600
+            assert hermes["plan_type"] == "pro"
+            assert resp.headers.get("X-Hermes-Error-Reset-At") == str(reset_at)
+            assert data["choices"][0]["finish_reason"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_failed_without_text_502_carries_usage_limit_context(self, adapter):
+        """Hard-fail (no text) 502 path also gets the typed code + reset."""
+        reset_at = int(time.time()) + 3600
+        mock_result = self._usage_limit_result(reset_at, final_response=None)
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
+                )
+            assert resp.status == 502
+            data = await resp.json()
+            assert data["error"]["type"] == "usage_limit_reached"
+            assert data["error"]["code"] == "usage_limit_reached"
+            assert data["error"]["hermes"]["reset_at"] == reset_at
+            assert data["error"]["hermes"]["resets_in_seconds"] == 3600
+            assert resp.headers.get("X-Hermes-Error-Reset-At") == str(reset_at)
+
+    @pytest.mark.asyncio
+    async def test_non_usage_limit_failure_keeps_agent_error_code(self, adapter):
+        """Regression guard: ordinary failures keep error_code='agent_error'
+        and never grow a reset header."""
+        mock_result = {
+            "final_response": "API call failed after 3 retries: HTTP 500",
+            "completed": False,
+            "partial": False,
+            "failed": True,
+            "error": "HTTP 500: boom",
+            "failure_reason": "server_error",
+            "messages": [],
+            "api_calls": 3,
+        }
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
+                )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["hermes"]["error_code"] == "agent_error"
+            assert "reset_at" not in data["hermes"]
+            assert "X-Hermes-Error-Reset-At" not in resp.headers
+
+
+# ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------
 

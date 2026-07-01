@@ -325,6 +325,226 @@ class TestSSEAgentCancelOnDisconnect:
 
         asyncio.run(run())
 
+    def test_usage_limit_failed_result_emits_typed_frame(self):
+        """A failed result carrying usage-limit context (ChatGPT-account Codex
+        429 ``usage_limit_reached``) must emit the typed contract frame:
+
+            {"error": {"type": "usage_limit_reached",
+                       "code": "usage_limit_reached",   # STRING — never 429
+                       "message": ..., "reset_at": <epoch int>,
+                       "resets_in_seconds": <int>, "plan_type": <str>}}
+
+        The desktop matches error.type/code === 'usage_limit_reached'.  The
+        code must NEVER be 429 (int or string): agente-desktop's
+        isQuotaExhaustedSignal matches code '429' and would hijack the frame
+        into the managed-tier "upgrade" bubble.
+        """
+        import time as _time
+
+        adapter = _make_adapter()
+
+        stream_q = queue.Queue()
+        stream_q.put(None)
+
+        reset_at = int(_time.time()) + 3600
+
+        async def fake_agent():
+            return (
+                {
+                    "final_response": "API call failed after 3 retries: HTTP 429",
+                    "failed": True,
+                    "completed": False,
+                    "error": "HTTP 429: The usage limit has been reached",
+                    "failure_reason": "rate_limit",
+                    "error_code": "usage_limit_reached",
+                    "reset_at": reset_at,
+                    "resets_in_seconds": 3600,
+                    "plan_type": "pro",
+                },
+                {"input_tokens": 5, "output_tokens": 0, "total_tokens": 5},
+            )
+
+        async def run():
+            from aiohttp import web
+
+            agent_task = asyncio.ensure_future(fake_agent())
+            await asyncio.sleep(0)
+
+            writes: list[str] = []
+            mock_response = AsyncMock(spec=web.StreamResponse)
+
+            async def write_side_effect(data):
+                writes.append(data.decode() if isinstance(data, bytes) else str(data))
+
+            mock_response.write = AsyncMock(side_effect=write_side_effect)
+            mock_response.prepare = AsyncMock()
+
+            with patch(
+                "gateway.platforms.api_server.web.StreamResponse",
+                return_value=mock_response,
+            ):
+                await adapter._write_sse_chat_completion(
+                    _make_request(), "cmpl-usage-limit", "gpt-4", 1234567890,
+                    stream_q, agent_task,
+                )
+
+            parsed_frames = [
+                json.loads(line.removeprefix("data: "))
+                for chunk in writes
+                for line in chunk.splitlines()
+                if line.startswith("data: ") and line != "data: [DONE]"
+            ]
+
+            error_frames = [f["error"] for f in parsed_frames if "error" in f]
+            assert error_frames, f"No error frame emitted: {parsed_frames}"
+            frame = error_frames[0]
+
+            assert frame["type"] == "usage_limit_reached"
+            # STRING code — never numeric 429 / string '429' (desktop
+            # isQuotaExhaustedSignal trap).
+            assert frame["code"] == "usage_limit_reached"
+            assert frame["code"] != 429 and frame["code"] != "429"
+            assert isinstance(frame["code"], str)
+            assert frame["reset_at"] == reset_at
+            assert frame["resets_in_seconds"] == 3600
+            assert frame["plan_type"] == "pro"
+            assert "usage limit" in frame["message"].lower()
+            # Must NOT be the generic collapse.
+            assert frame["type"] != "sidecar_agent_error"
+
+            finish_reasons = [
+                choice.get("finish_reason")
+                for f in parsed_frames
+                for choice in f.get("choices", [])
+                if choice.get("finish_reason") is not None
+            ]
+            assert "error" in finish_reasons
+            assert "stop" not in finish_reasons
+
+        asyncio.run(run())
+
+    def test_usage_limit_frame_from_failure_reason_and_reset_at_only(self):
+        """Even without error_code, failure_reason=rate_limit + reset_at is
+        enough to emit the typed frame (older terminal-dict producers)."""
+        import time as _time
+
+        adapter = _make_adapter()
+
+        stream_q = queue.Queue()
+        stream_q.put(None)
+
+        reset_at = int(_time.time()) + 7200
+
+        async def fake_agent():
+            return (
+                {
+                    "final_response": None,
+                    "failed": True,
+                    "error": "HTTP 429: rate limited",
+                    "failure_reason": "rate_limit",
+                    "reset_at": reset_at,
+                },
+                {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            )
+
+        async def run():
+            from aiohttp import web
+
+            agent_task = asyncio.ensure_future(fake_agent())
+            await asyncio.sleep(0)
+
+            writes: list[str] = []
+            mock_response = AsyncMock(spec=web.StreamResponse)
+
+            async def write_side_effect(data):
+                writes.append(data.decode() if isinstance(data, bytes) else str(data))
+
+            mock_response.write = AsyncMock(side_effect=write_side_effect)
+            mock_response.prepare = AsyncMock()
+
+            with patch(
+                "gateway.platforms.api_server.web.StreamResponse",
+                return_value=mock_response,
+            ):
+                await adapter._write_sse_chat_completion(
+                    _make_request(), "cmpl-usage-limit-fallback", "gpt-4",
+                    1234567890, stream_q, agent_task,
+                )
+
+            parsed_frames = [
+                json.loads(line.removeprefix("data: "))
+                for chunk in writes
+                for line in chunk.splitlines()
+                if line.startswith("data: ") and line != "data: [DONE]"
+            ]
+            error_frames = [f["error"] for f in parsed_frames if "error" in f]
+            assert error_frames, f"No error frame emitted: {parsed_frames}"
+            frame = error_frames[0]
+            assert frame["type"] == "usage_limit_reached"
+            assert frame["code"] == "usage_limit_reached"
+            assert frame["reset_at"] == reset_at
+            # Derived from reset_at when not provided explicitly.
+            assert isinstance(frame["resets_in_seconds"], int)
+            assert 0 < frame["resets_in_seconds"] <= 7200
+
+        asyncio.run(run())
+
+    def test_non_usage_limit_failed_result_keeps_generic_error_frame(self):
+        """Failures WITHOUT usage-limit context must keep emitting the
+        generic sidecar_agent_error payload (regression guard for #90)."""
+        adapter = _make_adapter()
+
+        stream_q = queue.Queue()
+        stream_q.put(None)
+
+        async def fake_agent():
+            return (
+                {
+                    "final_response": None,
+                    "failed": True,
+                    "error": "boom: provider exploded",
+                    "failure_reason": "server_error",
+                },
+                {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            )
+
+        async def run():
+            from aiohttp import web
+
+            agent_task = asyncio.ensure_future(fake_agent())
+            await asyncio.sleep(0)
+
+            writes: list[str] = []
+            mock_response = AsyncMock(spec=web.StreamResponse)
+
+            async def write_side_effect(data):
+                writes.append(data.decode() if isinstance(data, bytes) else str(data))
+
+            mock_response.write = AsyncMock(side_effect=write_side_effect)
+            mock_response.prepare = AsyncMock()
+
+            with patch(
+                "gateway.platforms.api_server.web.StreamResponse",
+                return_value=mock_response,
+            ):
+                await adapter._write_sse_chat_completion(
+                    _make_request(), "cmpl-generic-fail", "gpt-4",
+                    1234567890, stream_q, agent_task,
+                )
+
+            parsed_frames = [
+                json.loads(line.removeprefix("data: "))
+                for chunk in writes
+                for line in chunk.splitlines()
+                if line.startswith("data: ") and line != "data: [DONE]"
+            ]
+            error_frames = [f["error"] for f in parsed_frames if "error" in f]
+            assert error_frames, f"No error frame emitted: {parsed_frames}"
+            assert error_frames[0]["type"] == "sidecar_agent_error"
+            assert error_frames[0]["code"] == "agent_task_failed"
+
+        asyncio.run(run())
+
     def test_broken_pipe_also_cancels_agent(self):
         """BrokenPipeError (another disconnect variant) also cancels the task."""
         adapter = _make_adapter()
