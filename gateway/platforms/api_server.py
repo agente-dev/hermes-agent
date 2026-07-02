@@ -554,6 +554,104 @@ def _openai_error(message: str, err_type: str = "invalid_request_error", param: 
     }
 
 
+# ``reset_at`` sanity window: epoch values above this are epoch-MILLISECONDS
+# (1e11 seconds is year ~5138, while any epoch-ms after 1973 exceeds it).
+_RESET_AT_EPOCH_MS_THRESHOLD = 100_000_000_000
+# Accept resets up to 30 days out; tolerate 60s of clock skew into the past.
+_RESET_AT_MAX_FUTURE_SECONDS = 30 * 24 * 3600
+_RESET_AT_MAX_PAST_SECONDS = 60
+
+
+def _normalized_reset_at(value: Any) -> Optional[int]:
+    """Sanity-normalize a raw reset timestamp to a unix epoch int (seconds).
+
+    ``reset_at`` can flow from the raw ``x-ratelimit-reset`` header (see
+    ``agent_runtime_helpers.extract_api_error_context``), whose unit is
+    provider-defined: OpenRouter sends epoch MILLISECONDS while others send
+    epoch seconds or delta seconds. Forwarding a raw ms value would violate
+    the SSE contract ("unix epoch int, seconds") and render an absurd date
+    on the desktop (~year 57000); a delta value would render 1970.
+
+    * values above ``_RESET_AT_EPOCH_MS_THRESHOLD`` are treated as epoch-ms
+      and divided by 1000;
+    * values outside ``[now - 60s, now + 30d]`` are rejected (``None``).
+    """
+    if value in (None, ""):
+        return None
+    try:
+        reset_at = float(value)
+    except (TypeError, ValueError):
+        return None
+    if reset_at > _RESET_AT_EPOCH_MS_THRESHOLD:
+        reset_at /= 1000.0
+    now = time.time()
+    if not (now - _RESET_AT_MAX_PAST_SECONDS <= reset_at <= now + _RESET_AT_MAX_FUTURE_SECONDS):
+        return None
+    return int(reset_at)
+
+
+def _usage_limit_error_fields(result: Any) -> Optional[Dict[str, Any]]:
+    """Typed ``usage_limit_reached`` error fields from a failed agent result.
+
+    The conversation loop's terminal failure dict carries structured
+    rate-limit context (``error_code`` / ``reset_at`` / ``resets_in_seconds``
+    / ``plan_type``) when the provider's 429 body identified a plan-level
+    usage limit — e.g. ChatGPT-account Codex:
+    ``{'error': {'type': 'usage_limit_reached', 'plan_type': 'pro',
+    'resets_at': <epoch>, 'resets_in_seconds': <n>}}``.
+
+    Returns the SSE error-frame contract fields, or ``None`` when the
+    failure is not a usage limit (callers then fall back to the generic
+    agent-error payload).
+
+    Contract (agente-desktop electron/main/chat-ipc.ts): ``code`` MUST be
+    the STRING "usage_limit_reached" — never 429 (int) and never the string
+    "429".  The desktop's ``isQuotaExhaustedSignal`` matches code '429' and
+    would hijack the frame into the managed-tier "upgrade" bubble.  Desktop
+    matches ``error.type === 'usage_limit_reached' ||
+    error.code === 'usage_limit_reached'``.
+    """
+    if not isinstance(result, dict):
+        return None
+    error_code = str(result.get("error_code") or "").strip().lower()
+    reset_at = _normalized_reset_at(result.get("reset_at"))
+    # Without the typed ``usage_limit_reached`` error_code, a bare
+    # failure_reason='rate_limit' only qualifies when it carries a reset
+    # timestamp that survived normalization — an ordinary provider 429 with
+    # a malformed/mis-unit reset header must NOT emit the typed frame.
+    is_usage_limit = error_code == "usage_limit_reached" or (
+        result.get("failure_reason") == "rate_limit" and reset_at is not None
+    )
+    if not is_usage_limit:
+        return None
+
+    def _as_int(value: Any) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    resets_in = _as_int(result.get("resets_in_seconds"))
+    if resets_in is None and reset_at is not None:
+        resets_in = max(0, int(reset_at - time.time()))
+    message = (
+        result.get("error")
+        or result.get("final_response")
+        or "The usage limit has been reached."
+    )
+    plan_type = result.get("plan_type")
+    return {
+        "type": "usage_limit_reached",
+        "code": "usage_limit_reached",
+        "message": str(message),
+        "reset_at": reset_at,
+        "resets_in_seconds": resets_in,
+        "plan_type": plan_type if isinstance(plan_type, str) and plan_type else None,
+    }
+
+
 if AIOHTTP_AVAILABLE:
     @web.middleware
     async def body_limit_middleware(request, handler):
@@ -2055,6 +2153,13 @@ class APIServerAdapter(BasePlatformAdapter):
         if gateway_session_key:
             response_headers["X-Hermes-Session-Key"] = gateway_session_key
 
+        # Typed usage-limit context (ChatGPT-account Codex 429 with
+        # type=usage_limit_reached): surfaced on both failure paths below so
+        # non-streaming clients get the same reset info as the SSE frame.
+        usage_limit_fields = _usage_limit_error_fields(result) if is_failed else None
+        if usage_limit_fields is not None and usage_limit_fields.get("reset_at") is not None:
+            response_headers["X-Hermes-Error-Reset-At"] = str(usage_limit_fields["reset_at"])
+
         # Hard-fail path: no usable assistant text AND a real failure → 5xx
         # with OpenAI-style error envelope so SDK clients raise instead of
         # silently rendering the internal failure string as message.content.
@@ -2069,6 +2174,15 @@ class APIServerAdapter(BasePlatformAdapter):
                 "partial": is_partial,
                 "failed": is_failed,
             }
+            if usage_limit_fields is not None:
+                err_body["error"]["type"] = "usage_limit_reached"
+                err_body["error"]["code"] = "usage_limit_reached"
+                err_body["error"]["hermes"].update({
+                    "error_code": "usage_limit_reached",
+                    "reset_at": usage_limit_fields.get("reset_at"),
+                    "resets_in_seconds": usage_limit_fields.get("resets_in_seconds"),
+                    "plan_type": usage_limit_fields.get("plan_type"),
+                })
             response_headers["X-Hermes-Completed"] = "false"
             response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
             return web.json_response(err_body, status=502, headers=response_headers)
@@ -2098,13 +2212,21 @@ class APIServerAdapter(BasePlatformAdapter):
             },
         }
         if is_partial or is_failed or not completed:
-            response_data["hermes"] = {
+            hermes_extras = {
                 "completed": completed,
                 "partial": is_partial,
                 "failed": is_failed,
                 "error": err_msg,
                 "error_code": "output_truncated" if finish_reason == "length" else "agent_error",
             }
+            if usage_limit_fields is not None:
+                # Non-streaming parity with the SSE usage_limit_reached frame:
+                # string code (never 429) plus reset fields.
+                hermes_extras["error_code"] = "usage_limit_reached"
+                hermes_extras["reset_at"] = usage_limit_fields.get("reset_at")
+                hermes_extras["resets_in_seconds"] = usage_limit_fields.get("resets_in_seconds")
+                hermes_extras["plan_type"] = usage_limit_fields.get("plan_type")
+            response_data["hermes"] = hermes_extras
             response_headers["X-Hermes-Completed"] = "false"
             response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
             if err_msg:
@@ -2278,7 +2400,16 @@ class APIServerAdapter(BasePlatformAdapter):
             # so no content is duplicated.
             if isinstance(result, dict) and result.get("failed"):
                 err_msg = result.get("error") or "Agent run failed"
-                error_payload = _agent_error_payload(RuntimeError(err_msg))
+                # Plan-level usage limits (ChatGPT-account Codex 429 with
+                # type=usage_limit_reached) carry structured reset info in the
+                # failed result — emit the typed contract frame so the desktop
+                # can render "out of tokens until HH:MM" instead of a generic
+                # error. All other failures keep the generic payload.
+                _usage_limit_fields = _usage_limit_error_fields(result)
+                if _usage_limit_fields is not None:
+                    error_payload = {"error": _usage_limit_fields}
+                else:
+                    error_payload = _agent_error_payload(RuntimeError(err_msg))
                 await response.write(f"data: {json.dumps(error_payload)}\n\n".encode())
                 error_chunk = {
                     "id": completion_id, "object": "chat.completion.chunk",

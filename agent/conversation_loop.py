@@ -154,6 +154,82 @@ def _is_nous_inference_route(provider: str, base_url: str) -> bool:
     )
 
 
+# Fail fast on plan-level usage limits whose reset lies beyond anything the
+# retry loop could ever bridge: Retry-After is capped at 120s and jittered
+# backoff at 60s, so a reset further out than this guarantees every retry
+# hits the same 429.
+USAGE_LIMIT_FAIL_FAST_SECONDS = 180
+
+
+def _usage_limit_reset_seconds(error_context: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Seconds until a plan-level usage limit resets, or ``None``.
+
+    Returns a value only when the provider error body identified itself as a
+    usage limit (e.g. ChatGPT-account Codex 429 with
+    ``type=usage_limit_reached``) AND carried a usable reset time. Ordinary
+    transient 429s (no usage-limit type, or no/unparseable reset) return
+    ``None`` so the normal retry path is preserved.
+    """
+    ctx = error_context or {}
+    reason = str(ctx.get("reason") or "").lower()
+    if "usage_limit_reached" not in reason:
+        return None
+    resets_in = ctx.get("resets_in_seconds")
+    if resets_in not in (None, ""):
+        try:
+            return float(resets_in)
+        except (TypeError, ValueError):
+            pass
+    reset_at = ctx.get("reset_at")
+    if reset_at in (None, ""):
+        return None
+    try:
+        return float(reset_at) - time.time()
+    except (TypeError, ValueError):
+        return None
+
+
+def _rate_limit_reset_fields(error_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Structured reset fields for terminal failure results.
+
+    Extracts ``error_code`` / ``reset_at`` / ``resets_in_seconds`` /
+    ``plan_type`` from the context parsed off the provider error body (see
+    ``agent_runtime_helpers.extract_api_error_context``) so gateway surfaces
+    (SSE / non-streaming JSON) can emit a typed error — e.g. ChatGPT-account
+    Codex ``usage_limit_reached`` with its ``resets_at`` epoch — instead of
+    collapsing the failure to a generic message with no reset time.
+    """
+    fields: Dict[str, Any] = {}
+    ctx = error_context or {}
+    reason = str(ctx.get("reason") or "").strip()
+    if reason:
+        fields["error_code"] = reason
+    reset_at: Optional[int] = None
+    reset_at_raw = ctx.get("reset_at")
+    if reset_at_raw not in (None, ""):
+        try:
+            reset_at = int(float(reset_at_raw))
+        except (TypeError, ValueError):
+            reset_at = None
+    if reset_at is not None:
+        fields["reset_at"] = reset_at
+    resets_in: Optional[int] = None
+    resets_in_raw = ctx.get("resets_in_seconds")
+    if resets_in_raw not in (None, ""):
+        try:
+            resets_in = int(float(resets_in_raw))
+        except (TypeError, ValueError):
+            resets_in = None
+    if resets_in is None and reset_at is not None:
+        resets_in = max(0, int(reset_at - time.time()))
+    if resets_in is not None:
+        fields["resets_in_seconds"] = resets_in
+    plan_type = ctx.get("plan_type")
+    if isinstance(plan_type, str) and plan_type.strip():
+        fields["plan_type"] = plan_type.strip()
+    return fields
+
+
 def _billing_or_entitlement_message(
     *,
     capability: str,
@@ -2971,6 +3047,48 @@ def run_conversation(
                     # retry logic.  A different model (or the same
                     # model a moment later) will typically succeed.
 
+                # ── Plan usage limit with far-off reset: skip futile retries ──
+                # ChatGPT-account plans (e.g. Codex plan_type=pro) return 429
+                # bodies with type=usage_limit_reached and resets_at /
+                # resets_in_seconds.  Retry-After is capped at 120s and
+                # jittered backoff at 60s, so when the plan window resets
+                # beyond USAGE_LIMIT_FAIL_FAST_SECONDS every retry is
+                # guaranteed to hit the same 429 — fail fast to the terminal
+                # branch below so the structured reset time reaches the
+                # caller (gateway SSE / JSON) instead of burning
+                # max_retries × backoff first.  Ordinary transient 429s (no
+                # usage_limit_reached type, short or unknown reset) keep the
+                # existing retry behavior.
+                if (
+                    classified.reason == FailoverReason.rate_limit
+                    and not recovered_with_pool
+                    and retry_count < max_retries
+                ):
+                    _usage_limit_reset_in = _usage_limit_reset_seconds(error_context)
+                    if (
+                        _usage_limit_reset_in is not None
+                        and _usage_limit_reset_in > USAGE_LIMIT_FAIL_FAST_SECONDS
+                    ):
+                        agent._buffer_status(
+                            "⏳ Provider usage limit reached — reset is "
+                            f"~{int(_usage_limit_reset_in // 60)} min away, "
+                            "beyond the retry window. Not retrying."
+                        )
+                        logger.warning(
+                            "Usage limit reached with reset in %.0fs (> %ss) — "
+                            "skipping futile retries %s",
+                            _usage_limit_reset_in,
+                            USAGE_LIMIT_FAIL_FAST_SECONDS,
+                            agent._client_log_context(),
+                        )
+                        retry_count = max_retries
+                        # Intentionally NO ``continue`` — fall through so the
+                        # ``retry_count >= max_retries`` terminal branch below
+                        # still gets its fallback attempt and then returns the
+                        # structured failure result. A 429 cannot hit any of
+                        # the compression / client-error branches in between
+                        # (rate_limit is excluded from is_client_error).
+
                 is_payload_too_large = (
                     classified.reason == FailoverReason.payload_too_large
                 )
@@ -3528,7 +3646,7 @@ def run_conversation(
                             "execute_code with Python's open() for large "
                             "files, or to write in smaller sections."
                         )
-                    return {
+                    _terminal_result = {
                         "final_response": _final_response,
                         "messages": messages,
                         "api_calls": api_call_count,
@@ -3542,6 +3660,14 @@ def run_conversation(
                         # mean "quota wall, not a task error".
                         "failure_reason": classified.reason.value,
                     }
+                    # Structured rate-limit context (e.g. ChatGPT-account
+                    # Codex ``usage_limit_reached`` with ``resets_at``):
+                    # merge ``error_code`` / ``reset_at`` /
+                    # ``resets_in_seconds`` / ``plan_type`` so gateway
+                    # surfaces can emit a typed error frame with the actual
+                    # reset time instead of a generic failure message.
+                    _terminal_result.update(_rate_limit_reset_fields(error_context))
+                    return _terminal_result
 
                 # For rate limits, respect the Retry-After header if present
                 _retry_after = None
