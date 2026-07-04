@@ -36,6 +36,51 @@ _SAFE_CHILD_ENV_KEYS = (
     "AG""ENTE_GWS_BIN",
 )
 _SECRET_ENV_KEYS = {"GOOGLE_WORKSPACE_CLI_CLIENT_SECRET"}
+# Windows-only: the OS itself needs these for the gws child to initialize
+# Winsock and resolve DNS. Without SYSTEMROOT (etc.) the child cannot load the
+# name-resolution provider DLLs from %SystemRoot%\System32, so every lookup of
+# a Google API host fails non-recoverably with WSANO_RECOVERY — surfaced by gws
+# as ``dns error: A non-recoverable error occurred during a database lookup.
+# (os error 11003)``. These are public OS paths, never secrets. They are absent
+# from os.environ on macOS/Linux, so forwarding them there is a no-op. Mirrors
+# tools.code_execution_tool._WINDOWS_ESSENTIAL_ENV_VARS (keep in sync).
+_WINDOWS_ESSENTIAL_ENV_KEYS = (
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "OS",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+    "PUBLIC",
+    "ALLUSERSPROFILE",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "USERPROFILE",
+    "USERDOMAIN",
+    "USERNAME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "COMPUTERNAME",
+)
+# Proxy configuration must reach the child so corporate-proxy networks can
+# still reach Google's API hosts. Both cases are forwarded because different
+# HTTP stacks honor different casings.
+_PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+)
 
 
 def _event_timezone() -> str:
@@ -78,8 +123,19 @@ def _gws_bin() -> str:
 
 
 def _gws_env() -> Dict[str, str]:
-    """Return a narrow child env without direct Google Workspace secret material."""
-    env = {key: os.environ[key] for key in _SAFE_CHILD_ENV_KEYS if key in os.environ}
+    """Return a narrow child env without direct Google Workspace secret material.
+
+    On Windows the allowlist additionally forwards OS-essential variables
+    (``SYSTEMROOT`` etc.) and proxy configuration; without ``SYSTEMROOT`` the gws
+    child cannot initialize Winsock and DNS resolution of the Google API host
+    fails with ``os error 11003`` (WSANO_RECOVERY). Those names are absent on
+    macOS/Linux, so the ``if key in os.environ`` guard makes this a no-op there.
+    The email/drive plugins pass the full parent env; the calendar plugin keeps
+    a deliberately narrow allowlist, so the OS-essential keys must be opted in
+    here explicitly.
+    """
+    allow = _SAFE_CHILD_ENV_KEYS + _WINDOWS_ESSENTIAL_ENV_KEYS + _PROXY_ENV_KEYS
+    env = {key: os.environ[key] for key in allow if key in os.environ}
     for key, value in os.environ.items():
         if key in _SECRET_ENV_KEYS:
             continue

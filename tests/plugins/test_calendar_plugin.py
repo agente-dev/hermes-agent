@@ -70,6 +70,36 @@ def test_resolve_gws_bin_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cp._gws_bin() == "/opt/bundle/gws"
 
 
+def test_gws_env_forwards_windows_os_essentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: the child env must carry Windows OS-essential vars.
+
+    Without SYSTEMROOT the gws child cannot init Winsock and every Google API
+    DNS lookup fails with WSANO_RECOVERY ("os error 11003") on Windows, while
+    macOS is unaffected. See calendar_plugin._WINDOWS_ESSENTIAL_ENV_KEYS.
+    """
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+    monkeypatch.setenv("APPDATA", r"C:\Users\op\AppData\Roaming")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp:8080")
+    # A var that is neither allowlisted nor a GWS_/GOOGLE_WORKSPACE_CLI_ prefix
+    # must NOT leak into the child env.
+    monkeypatch.setenv("SOME_UNRELATED_VAR", "leak-me")
+
+    env = cp._gws_env()
+
+    assert env.get("SYSTEMROOT") == r"C:\Windows"
+    assert env.get("APPDATA") == r"C:\Users\op\AppData\Roaming"
+    assert env.get("HTTPS_PROXY") == "http://proxy.corp:8080"
+    assert "SOME_UNRELATED_VAR" not in env
+
+
+def test_gws_env_still_scrubs_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CLIENT_SECRET", "top-secret")
+    monkeypatch.setenv("GWS_TOKEN_STORE", "/tmp/store")
+    env = cp._gws_env()
+    assert "GOOGLE_WORKSPACE_CLI_CLIENT_SECRET" not in env
+    assert env.get("GWS_TOKEN_STORE") == "/tmp/store"
+
+
 def test_list_calendar_events_shells_gws(fake_gws: Path) -> None:
     events = cp.list_calendar_events(after="today", before="today+1d")
     assert isinstance(events, list)
