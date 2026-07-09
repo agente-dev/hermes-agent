@@ -7,7 +7,9 @@ Covers:
   * Each tool shells the expected ``gws gmail users <subcmd> --params`` argv.
   * Stdout JSON is parsed and returned as a dict/list.
   * TimeoutExpired returns {"error": "gws_timeout"} dict.
-  * Plugin __init__ exposes 5 tools through the register() context shim.
+  * Plugin __init__ exposes all tools through the register() context shim.
+  * download_email_attachment decodes base64url and writes bytes to disk.
+  * save_email_attachments enumerates + batch-downloads all attachments.
 """
 
 from __future__ import annotations
@@ -244,7 +246,171 @@ class TestErrorPropagation:
 
 
 # ---------------------------------------------------------------------------
-# Plugin registration — discoverable + 5 tools
+# Attachment download
+# ---------------------------------------------------------------------------
+
+
+class TestDownloadEmailAttachment:
+    def test_decodes_base64url_and_writes_file(self, email_plugin, tmp_path):
+        raw_bytes = b"%PDF-1.4 fake invoice"
+        b64 = base64.urlsafe_b64encode(raw_bytes).decode().rstrip("=")
+        payload = {"data": b64, "size": len(raw_bytes)}
+        with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed(json.dumps(payload))):
+            result = email_plugin.download_email_attachment(
+                message_id="msg123",
+                attachment_id="att456",
+                filename="invoice.pdf",
+                dest_dir=str(tmp_path),
+            )
+        assert result["saved_path"] == str(tmp_path / "invoice.pdf")
+        assert result["size"] == len(raw_bytes)
+        assert (tmp_path / "invoice.pdf").read_bytes() == raw_bytes
+
+    def test_gws_error_propagates(self, email_plugin, tmp_path):
+        with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed("", returncode=2, stderr="not found")):
+            result = email_plugin.download_email_attachment(
+                message_id="msg123",
+                attachment_id="att456",
+                filename="invoice.pdf",
+                dest_dir=str(tmp_path),
+            )
+        assert result["error"] == "gws_error"
+
+    def test_empty_data_returns_error(self, email_plugin, tmp_path):
+        with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed('{"data": ""}')):
+            result = email_plugin.download_email_attachment(
+                message_id="msg123",
+                attachment_id="att456",
+                filename="invoice.pdf",
+                dest_dir=str(tmp_path),
+            )
+        assert result["error"] == "gws_attachment_empty"
+
+    def test_shells_correct_argv(self, email_plugin, tmp_path):
+        raw_bytes = b"hello"
+        b64 = base64.urlsafe_b64encode(raw_bytes).decode().rstrip("=")
+        payload = {"data": b64, "size": 5}
+        with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed(json.dumps(payload))) as run:
+            email_plugin.download_email_attachment(
+                message_id="msg123",
+                attachment_id="att456",
+                filename="report.pdf",
+                dest_dir=str(tmp_path),
+            )
+        argv = run.call_args[0][0]
+        expected_params = json.dumps({"userId": "me", "id": "msg123", "attachmentId": "att456"})
+        assert argv == ["/fake/bin/gws", "gmail", "users", "messages", "attachments", "get", "--params", expected_params]
+
+    def test_strips_path_separators_from_filename(self, email_plugin, tmp_path):
+        raw_bytes = b"data"
+        b64 = base64.urlsafe_b64encode(raw_bytes).decode().rstrip("=")
+        payload = {"data": b64, "size": 4}
+        with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed(json.dumps(payload))):
+            result = email_plugin.download_email_attachment(
+                message_id="m1",
+                attachment_id="a1",
+                filename="../../../etc/passwd",
+                dest_dir=str(tmp_path),
+            )
+        # Should write basename only, not traverse directories
+        assert result["saved_path"] == str(tmp_path / "passwd")
+        assert not (tmp_path / "../../../etc/passwd").exists()
+
+
+class TestSaveEmailAttachments:
+    def _raw_gmail_with_two_attachments(self):
+        """Raw Gmail API response (as returned by gws) with two PDF attachments."""
+        return {
+            "payload": {
+                "headers": [{"name": "Subject", "value": "Invoices"}],
+                "parts": [
+                    {"filename": "invoice1.pdf", "mimeType": "application/pdf",
+                     "body": {"attachmentId": "att1", "size": 100}, "partId": "0"},
+                    {"filename": "invoice2.pdf", "mimeType": "application/pdf",
+                     "body": {"attachmentId": "att2", "size": 200}, "partId": "1"},
+                ],
+            }
+        }
+
+    def test_downloads_all_attachments(self, email_plugin, tmp_path):
+        msg_result = json.dumps(self._raw_gmail_with_two_attachments())
+        att1_result = json.dumps({"data": base64.urlsafe_b64encode(b"pdf1").decode().rstrip("="), "size": 4})
+        att2_result = json.dumps({"data": base64.urlsafe_b64encode(b"pdf2data").decode().rstrip("="), "size": 8})
+        responses = iter([_completed(msg_result), _completed(att1_result), _completed(att2_result)])
+        with patch("plugins.email.email_plugin.subprocess.run", side_effect=lambda *a, **kw: next(responses)):
+            result = email_plugin.save_email_attachments(message_id="m1", dest_dir=str(tmp_path))
+        assert len(result["saved"]) == 2
+        assert result["skipped"] == []
+        assert (tmp_path / "invoice1.pdf").read_bytes() == b"pdf1"
+        assert (tmp_path / "invoice2.pdf").read_bytes() == b"pdf2data"
+
+    def test_filename_filter_skips_non_matching(self, email_plugin, tmp_path):
+        msg_result = json.dumps(self._raw_gmail_with_two_attachments())
+        att1_result = json.dumps({"data": base64.urlsafe_b64encode(b"pdf1").decode().rstrip("="), "size": 4})
+        responses = iter([_completed(msg_result), _completed(att1_result)])
+        with patch("plugins.email.email_plugin.subprocess.run", side_effect=lambda *a, **kw: next(responses)):
+            result = email_plugin.save_email_attachments(
+                message_id="m1", dest_dir=str(tmp_path), filename_filter="invoice1"
+            )
+        assert len(result["saved"]) == 1
+        assert result["saved"][0]["filename"] == "invoice1.pdf"
+        assert "invoice2.pdf" in result["skipped"]
+        assert not (tmp_path / "invoice2.pdf").exists()
+
+    def test_creates_dest_dir_if_missing(self, email_plugin, tmp_path):
+        nested = tmp_path / "Agente" / "invoices"
+        # Raw Gmail message with no attachment parts
+        msg_result = json.dumps({"payload": {"headers": [], "parts": []}})
+        with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed(msg_result)):
+            result = email_plugin.save_email_attachments(message_id="m1", dest_dir=str(nested))
+        assert result["saved"] == []
+        assert nested.exists()
+
+    def test_message_with_no_attachments(self, email_plugin, tmp_path):
+        msg_result = json.dumps({"payload": {"headers": [], "parts": []}})
+        with patch("plugins.email.email_plugin.subprocess.run", return_value=_completed(msg_result)):
+            result = email_plugin.save_email_attachments(message_id="m1", dest_dir=str(tmp_path))
+        assert result["saved"] == []
+        assert result["skipped"] == []
+
+    def test_dedup_same_filename(self, email_plugin, tmp_path):
+        """Two attachments with the same filename get _2 suffix."""
+        msg_result = json.dumps({
+            "payload": {
+                "headers": [],
+                "parts": [
+                    {"filename": "dup.pdf", "mimeType": "application/pdf",
+                     "body": {"attachmentId": "a1", "size": 1}, "partId": "0"},
+                    {"filename": "dup.pdf", "mimeType": "application/pdf",
+                     "body": {"attachmentId": "a2", "size": 1}, "partId": "1"},
+                ],
+            }
+        })
+        att_result = json.dumps({"data": base64.urlsafe_b64encode(b"x").decode().rstrip("="), "size": 1})
+        responses = iter([_completed(msg_result), _completed(att_result), _completed(att_result)])
+        with patch("plugins.email.email_plugin.subprocess.run", side_effect=lambda *a, **kw: next(responses)):
+            result = email_plugin.save_email_attachments(message_id="m1", dest_dir=str(tmp_path))
+        assert len(result["saved"]) == 2
+        names = sorted(s["filename"] for s in result["saved"])
+        assert names == ["dup.pdf", "dup_2.pdf"]
+
+
+class TestDecodeBase64url:
+    def test_handles_missing_padding(self, email_plugin):
+        # base64url without padding for b"hi"
+        assert email_plugin._decode_base64url("aGk") == b"hi"
+
+    def test_handles_whitespace(self, email_plugin):
+        assert email_plugin._decode_base64url("a Gk\n") == b"hi"
+
+    def test_roundtrip(self, email_plugin):
+        original = b"\x89PNG fake pdf content"
+        encoded = base64.urlsafe_b64encode(original).decode().rstrip("=")
+        assert email_plugin._decode_base64url(encoded) == original
+
+
+# ---------------------------------------------------------------------------
+# Plugin registration — discoverable + tools
 # ---------------------------------------------------------------------------
 
 
@@ -282,12 +448,13 @@ def test_register_exposes_tools(monkeypatch):
 
     names = [t["name"] for t in ctx.tools]
     expected = [
-        "apply_label", "archive_email", "batch_modify", "draft_email",
+        "apply_label", "archive_email", "batch_modify",
+        "download_email_attachment", "draft_email",
         "draft_reply", "forward_email", "get_thread", "list_emails",
         "list_labels", "mark_email", "mark_read", "mark_unread",
         "read_email", "read_email_attachments", "reply_all_email",
-        "reply_email", "search_emails", "send_draft", "send_email",
-        "trash_email", "triage_inbox",
+        "reply_email", "save_email_attachments", "search_emails",
+        "send_draft", "send_email", "trash_email", "triage_inbox",
     ]
     assert sorted(names) == expected
     for t in ctx.tools:

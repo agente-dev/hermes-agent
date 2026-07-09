@@ -20,9 +20,11 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import Any
 
 _GWS_TIMEOUT = 30
@@ -182,6 +184,122 @@ def read_email_attachments(message_id: str) -> dict:
             })
 
     return {"headers": headers, "attachments": attachments}
+
+
+def download_email_attachment(
+    message_id: str,
+    attachment_id: str,
+    filename: str,
+    dest_dir: str,
+) -> dict:
+    """Download a single Gmail attachment and write it to ``dest_dir/filename``.
+
+    Fetches the base64url-encoded attachment data from the Gmail attachments
+    endpoint via gws, decodes it, and saves the binary to disk.
+
+    Returns ``{"saved_path": "<absolute path>", "size": <bytes>}`` on success
+    or ``{"error": "..."}`` on failure.
+    """
+    dest_path = Path(dest_dir).expanduser().resolve()
+    dest_path.mkdir(parents=True, exist_ok=True)
+    # Sanitise filename: strip path separators, keep the basename.
+    safe_name = os.path.basename(filename) or "attachment"
+    target = dest_path / safe_name
+
+    params = {"userId": "me", "id": message_id, "attachmentId": attachment_id}
+    result = _gws_json(
+        ["gmail", "users", "messages", "attachments", "get", "--params", json.dumps(params)]
+    )
+    if isinstance(result, dict) and "error" in result:
+        return result
+
+    data_b64 = result.get("data", "")
+    if not data_b64:
+        return {"error": "gws_attachment_empty", "message_id": message_id, "attachment_id": attachment_id}
+
+    # Gmail returns base64url with potential padding stripped.
+    raw = _decode_base64url(data_b64)
+    target.write_bytes(raw)
+    return {"saved_path": str(target), "size": len(raw)}
+
+
+def save_email_attachments(
+    message_id: str,
+    dest_dir: str,
+    filename_filter: str | None = None,
+) -> dict:
+    """Discover and download ALL attachments from a Gmail message.
+
+    Calls ``read_email_attachments`` to enumerate attachment parts, then
+    downloads each one to ``dest_dir``.  If ``filename_filter`` is provided,
+    only attachments whose filename contains the substring are downloaded.
+
+    Returns ``{"saved": [{filename, saved_path, size}, ...],
+    "skipped": [...], "message_id": ...}``.
+    """
+    info = read_email_attachments(message_id)
+    if isinstance(info, dict) and "error" in info:
+        return info
+
+    attachments = info.get("attachments", [])
+    dest_path = Path(dest_dir).expanduser().resolve()
+    dest_path.mkdir(parents=True, exist_ok=True)
+
+    saved: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    seen_paths: set[str] = set()
+
+    for att in attachments:
+        fname = att.get("filename", "")
+        if not fname:
+            continue
+        if filename_filter and filename_filter.lower() not in fname.lower():
+            skipped.append(fname)
+            continue
+
+        # De-duplicate: append _2, _3, … if the target already exists from
+        # a prior iteration (same filename across different parts).
+        target = dest_path / os.path.basename(fname)
+        if str(target) in seen_paths or target.exists():
+            target = _unique_path(target)
+        seen_paths.add(str(target))
+
+        dl = download_email_attachment(
+            message_id=message_id,
+            attachment_id=att["attachmentId"],
+            filename=target.name,
+            dest_dir=str(dest_path),
+        )
+        if isinstance(dl, dict) and "error" in dl:
+            skipped.append(f"{fname} ({dl['error']})")
+        else:
+            saved.append({"filename": target.name, "saved_path": dl["saved_path"], "size": dl["size"]})
+
+    return {"saved": saved, "skipped": skipped, "message_id": message_id}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _decode_base64url(data: str) -> bytes:
+    """Decode a Gmail base64url string (handles missing padding + whitespace)."""
+    cleaned = re.sub(r"\s+", "", data)
+    padding = "=" * (-len(cleaned) % 4)
+    return base64.urlsafe_b64decode(cleaned + padding)
+
+
+def _unique_path(path: Path) -> Path:
+    """Return ``path`` with a _2, _3, … suffix if it already exists."""
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    for i in range(2, 1000):
+        candidate = parent / f"{stem}_{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+    return parent / f"{stem}_999{suffix}"
 
 
 def get_thread(thread_id: str) -> dict:
