@@ -102,6 +102,35 @@ READ_EMAIL_ATTACHMENTS_SCHEMA = {
     },
 }
 
+DOWNLOAD_EMAIL_ATTACHMENT_SCHEMA = {
+    "name": "download_email_attachment",
+    "description": "Download a single Gmail attachment by its attachmentId and save it to dest_dir/filename. Use read_email_attachments first to get the attachmentId.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "message_id": COMMON_STRING,
+            "attachment_id": COMMON_STRING,
+            "filename": {"type": "string", "description": "Filename for the saved file (path separators stripped, basename only)"},
+            "dest_dir": {"type": "string", "description": "Destination directory (created if it does not exist, ~ expanded)"},
+        },
+        "required": ["message_id", "attachment_id", "filename", "dest_dir"],
+    },
+}
+
+SAVE_EMAIL_ATTACHMENTS_SCHEMA = {
+    "name": "save_email_attachments",
+    "description": "Download ALL attachments from a Gmail message and save them to dest_dir. Optionally filter by filename substring. Returns a list of saved files with absolute paths.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "message_id": COMMON_STRING,
+            "dest_dir": {"type": "string", "description": "Destination directory (created if it does not exist, ~ expanded)"},
+            "filename_filter": {"type": "string", "description": "Optional substring to filter attachments by filename (case-insensitive). Only matching files are downloaded."},
+        },
+        "required": ["message_id", "dest_dir"],
+    },
+}
+
 GET_THREAD_SCHEMA = {
     "name": "get_thread",
     "description": "Get a full Gmail thread with all messages by thread ID.",

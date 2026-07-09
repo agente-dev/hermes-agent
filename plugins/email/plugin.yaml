@@ -14,6 +14,8 @@ operator_visible_surface:
   - "Full-text email search (Gmail q syntax)"
   - "Inbox triage"
   - "Read email with attachment metadata"
+  - "Download email attachment (binary save to disk)"
+  - "Save all email attachments (batch download to folder)"
   - "Thread view"
   - "Reply / reply-all / forward"
   - "Draft + send draft"
@@ -28,6 +30,8 @@ provides_tools:
   - search_emails
   - triage_inbox
   - read_email_attachments
+  - download_email_attachment
+  - save_email_attachments
   - get_thread
   - reply_email
   - reply_all_email

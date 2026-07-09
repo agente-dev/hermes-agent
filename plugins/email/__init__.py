@@ -1,13 +1,14 @@
 """Email connector plugin — bundled, auto-loaded.
 
-Registers 21 tools (``list_emails``, ``read_email``, ``draft_reply``,
+Registers 23 tools (``list_emails``, ``read_email``, ``draft_reply``,
 ``send_email``, ``mark_email``, ``search_emails``, ``triage_inbox``,
-``read_email_attachments``, ``get_thread``, ``reply_email``, ``reply_all_email``,
-``forward_email``, ``draft_email``, ``send_draft``, ``list_labels``,
-``apply_label``, ``trash_email``, ``batch_modify``, ``mark_read``,
-``mark_unread``, ``archive_email``) into the ``email`` toolset. Each tool is a
-thin subprocess wrapper over the bundled ``gws`` (googleworkspace/cli)
-binary. See ``email_plugin.py`` for the wire format.
+``read_email_attachments``, ``download_email_attachment``,
+``save_email_attachments``, ``get_thread``, ``reply_email``,
+``reply_all_email``, ``forward_email``, ``draft_email``, ``send_draft``,
+``list_labels``, ``apply_label``, ``trash_email``, ``batch_modify``,
+``mark_read``, ``mark_unread``, ``archive_email``) into the ``email``
+toolset. Each tool is a thin subprocess wrapper over the bundled ``gws``
+(googleworkspace/cli) binary. See ``email_plugin.py`` for the wire format.
 
 OAuth + token storage are owned by gws; this plugin holds zero credentials.
 """
@@ -23,6 +24,7 @@ from plugins.email.schemas import (
     APPLY_LABEL_SCHEMA,
     ARCHIVE_EMAIL_SCHEMA,
     BATCH_MODIFY_SCHEMA,
+    DOWNLOAD_EMAIL_ATTACHMENT_SCHEMA,
     DRAFT_EMAIL_SCHEMA,
     DRAFT_REPLY_SCHEMA,
     FORWARD_EMAIL_SCHEMA,
@@ -36,6 +38,7 @@ from plugins.email.schemas import (
     READ_EMAIL_SCHEMA,
     REPLY_ALL_EMAIL_SCHEMA,
     REPLY_EMAIL_SCHEMA,
+    SAVE_EMAIL_ATTACHMENTS_SCHEMA,
     SEARCH_EMAILS_SCHEMA,
     SEND_DRAFT_SCHEMA,
     SEND_EMAIL_SCHEMA,
@@ -77,6 +80,8 @@ _TOOLS = (
     ("search_emails", SEARCH_EMAILS_SCHEMA, _wrap(email_plugin.search_emails, "query", "folder", "max_results", "page_token"), "🔍"),
     ("triage_inbox", TRIAGE_INBOX_SCHEMA, _wrap(email_plugin.triage_inbox, "query", "max_results"), "📊"),
     ("read_email_attachments", READ_EMAIL_ATTACHMENTS_SCHEMA, _wrap(email_plugin.read_email_attachments, "message_id"), "📎"),
+    ("download_email_attachment", DOWNLOAD_EMAIL_ATTACHMENT_SCHEMA, _wrap(email_plugin.download_email_attachment, "message_id", "attachment_id", "filename", "dest_dir"), "💾"),
+    ("save_email_attachments", SAVE_EMAIL_ATTACHMENTS_SCHEMA, _wrap(email_plugin.save_email_attachments, "message_id", "dest_dir", "filename_filter"), "📦"),
     ("get_thread", GET_THREAD_SCHEMA, _wrap(email_plugin.get_thread, "thread_id"), "🧵"),
     ("reply_email", REPLY_EMAIL_SCHEMA, _wrap(email_plugin.reply_email, "message_id", "body"), "↩️"),
     ("reply_all_email", REPLY_ALL_EMAIL_SCHEMA, _wrap(email_plugin.reply_all_email, "message_id", "body"), "↪️"),
