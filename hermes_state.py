@@ -1153,6 +1153,68 @@ class SessionDB:
             )
         self._execute_write(_do)
 
+    def get_codex_app_server_thread_id(self, session_id: str) -> Optional[str]:
+        """Return the non-secret Codex thread linked to a Hermes session."""
+        if not session_id:
+            return None
+        row = self.get_session(session_id)
+        if not row:
+            return None
+        raw = row.get("model_config")
+        try:
+            model_config = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(model_config, dict):
+            return None
+        thread_id = model_config.get("_codex_app_server_thread_id")
+        if not isinstance(thread_id, str):
+            return None
+        thread_id = thread_id.strip()
+        return thread_id if 0 < len(thread_id) <= 512 else None
+
+    def set_codex_app_server_thread_id(
+        self,
+        session_id: str,
+        thread_id: Optional[str],
+    ) -> None:
+        """Merge a Codex thread id into session metadata atomically.
+
+        Thread ids are conversation locators, not credentials. This method
+        intentionally accepts no account, access-token, or refresh-token data.
+        Passing ``None`` clears a stale mapping.
+        """
+        if not session_id:
+            return
+        normalized = str(thread_id or "").strip()
+        if normalized and len(normalized) > 512:
+            raise ValueError("codex app-server thread id is too long")
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT model_config FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return
+            raw = row["model_config"] if isinstance(row, sqlite3.Row) else row[0]
+            try:
+                model_config = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, ValueError):
+                model_config = {}
+            if not isinstance(model_config, dict):
+                model_config = {}
+            if normalized:
+                model_config["_codex_app_server_thread_id"] = normalized
+            else:
+                model_config.pop("_codex_app_server_thread_id", None)
+            conn.execute(
+                "UPDATE sessions SET model_config = ? WHERE id = ?",
+                (json.dumps(model_config), session_id),
+            )
+
+        self._execute_write(_do)
+
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         """Store the full assembled system prompt snapshot."""
         def _do(conn):

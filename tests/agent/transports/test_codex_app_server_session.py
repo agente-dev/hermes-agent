@@ -7,6 +7,7 @@ deadline timeouts. These tests pin all of that without spawning real codex.
 
 from __future__ import annotations
 
+import os
 import time
 from unittest.mock import patch
 from typing import Any, Optional
@@ -44,6 +45,10 @@ class FakeClient:
         self._initialized = True
         return {"userAgent": "fake/0.0.0", "codexHome": "/tmp",
                 "platformOs": "linux", "platformFamily": "unix"}
+
+    def account_read(self, *, refresh_token=False, timeout=30.0):
+        return {"account": {"type": "chatgpt", "planType": "plus"},
+                "requiresOpenaiAuth": True}
 
     def request(self, method: str, params: Optional[dict] = None, timeout: float = 30.0):
         self.requests.append((method, params or {}))
@@ -149,17 +154,108 @@ class TestLifecycle:
         method_calls = [m for (m, _) in client.requests if m == "thread/start"]
         assert len(method_calls) == 1
 
-    def test_thread_start_passes_cwd_only(self):
-        """thread/start carries cwd. We intentionally do NOT pass `permissions`
+    def test_thread_start_passes_selected_model_and_cwd(self):
+        """thread/start carries model and cwd but no experimental permissions.
         on this codex version (experimentalApi-gated + requires matching
         config.toml [permissions] table). Letting codex use its default
         (read-only unless user configures otherwise) is the documented path."""
         client = FakeClient()
-        s = make_session(client, permission_profile="workspace-write")
+        s = make_session(
+            client,
+            permission_profile="workspace-write",
+            model="gpt-5.4",
+        )
         s.ensure_started()
         method, params = next(r for r in client.requests if r[0] == "thread/start")
         assert params["cwd"] == "/tmp"
+        assert params["model"] == "gpt-5.4"
         assert "permissions" not in params  # see session.ensure_started() comment
+
+    def test_resume_uses_persisted_thread_id(self):
+        client = FakeClient()
+        client._request_handler = lambda method, params: (
+            {"thread": {"id": params["threadId"]}}
+            if method == "thread/resume"
+            else {}
+        )
+        s = make_session(
+            client,
+            model="gpt-5.4",
+            resume_thread_id="thread-existing",
+        )
+
+        assert s.ensure_started() == "thread-existing"
+        method, params = next(r for r in client.requests if r[0] == "thread/resume")
+        assert method == "thread/resume"
+        assert params == {
+            "cwd": "/tmp",
+            "model": "gpt-5.4",
+            "threadId": "thread-existing",
+        }
+
+    def test_stale_resume_falls_back_to_new_thread(self):
+        from agent.transports.codex_app_server import CodexAppServerError
+
+        client = FakeClient()
+
+        def handler(method, params):
+            if method == "thread/resume":
+                raise CodexAppServerError(
+                    code=-32602,
+                    message="thread not found",
+                )
+            if method == "thread/start":
+                return {"thread": {"id": "thread-new"}}
+            return {}
+
+        client._request_handler = handler
+        s = make_session(
+            client,
+            model="gpt-5.4",
+            resume_thread_id="thread-stale",
+        )
+
+        assert s.ensure_started() == "thread-new"
+        assert [method for method, _ in client.requests] == [
+            "thread/resume",
+            "thread/start",
+        ]
+
+    def test_non_stale_resume_error_fails_closed(self):
+        from agent.transports.codex_app_server import CodexAppServerError
+
+        client = FakeClient()
+
+        def handler(method, params):
+            raise CodexAppServerError(
+                code=-32001,
+                message="authentication failed",
+            )
+
+        client._request_handler = handler
+        s = make_session(client, resume_thread_id="thread-existing")
+
+        with pytest.raises(CodexAppServerError, match="authentication failed"):
+            s.ensure_started()
+        assert [method for method, _ in client.requests] == ["thread/resume"]
+
+    def test_unrelated_does_not_exist_error_does_not_start_new_thread(self):
+        from agent.transports.codex_app_server import CodexAppServerError
+
+        client = FakeClient()
+
+        def handler(method, params):
+            raise CodexAppServerError(
+                code=-32001,
+                message="account does not exist",
+            )
+
+        client._request_handler = handler
+        s = make_session(client, resume_thread_id="thread-existing")
+
+        with pytest.raises(CodexAppServerError, match="account does not exist"):
+            s.ensure_started()
+        assert [method for method, _ in client.requests] == ["thread/resume"]
 
     def test_close_idempotent(self):
         client = FakeClient()
@@ -168,6 +264,29 @@ class TestLifecycle:
         s.close()
         s.close()
         assert client._closed is True
+
+    def test_child_env_overlay_reaches_client_without_global_mutation(
+        self, monkeypatch
+    ):
+        client = FakeClient()
+        captured = {}
+        monkeypatch.setenv("HERMES_SESSION_KEY", "unrelated-process-value")
+
+        def factory(**kwargs):
+            captured.update(kwargs)
+            return client
+
+        s = CodexAppServerSession(
+            cwd="/tmp",
+            client_factory=factory,
+            child_env={"HERMES_SESSION_KEY": "gateway:desktop:user-1"},
+        )
+        s.ensure_started()
+
+        assert captured["env"] == {
+            "HERMES_SESSION_KEY": "gateway:desktop:user-1"
+        }
+        assert os.environ["HERMES_SESSION_KEY"] == "unrelated-process-value"
 
 
 # ---- turn loop ----
@@ -487,10 +606,8 @@ class TestServerRequestRouting:
             for (rid, code, _msg) in client.error_responses
         )
 
-    def test_mcp_elicitation_for_hermes_tools_auto_accepts(self):
-        """When codex elicits on behalf of hermes-tools (our own callback),
-        accept automatically — the user already opted in by enabling the
-        runtime."""
+    def test_mcp_elicitation_for_hermes_tools_declines_without_callback(self):
+        """Managed server identity is not authorization for user input."""
         client = FakeClient()
         client.queue_server_request(
             "mcpServer/elicitation/request", request_id="elic-1",
@@ -506,7 +623,107 @@ class TestServerRequestRouting:
         )
         s = make_session(client)
         s.run_turn("hi", turn_timeout=1.0)
-        assert ("elic-1", {"action": "accept", "content": None, "_meta": None}) in client.responses
+        assert (
+            "elic-1",
+            {"action": "decline", "content": None, "_meta": None},
+        ) in client.responses
+
+    def test_mcp_elicitation_trusted_callback_can_accept(self):
+        client = FakeClient()
+        client.queue_server_request(
+            "mcpServer/elicitation/request",
+            request_id="elic-trusted",
+            threadId="t",
+            turnId="tu1",
+            serverName="hermes-tools",
+            mode="form",
+            message="choose",
+            requestedSchema={"type": "object", "properties": {}},
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        captured = {}
+
+        def decide(params):
+            captured.update(params)
+            return {
+                "action": "accept",
+                "content": {"choice": "approved"},
+                "_meta": {"source": "trusted-ui"},
+            }
+
+        s = make_session(client, elicitation_callback=decide)
+        s.run_turn("hi", turn_timeout=1.0)
+
+        assert captured["serverName"] == "hermes-tools"
+        assert (
+            "elic-trusted",
+            {
+                "action": "accept",
+                "content": {"choice": "approved"},
+                "_meta": {"source": "trusted-ui"},
+            },
+        ) in client.responses
+
+    @pytest.mark.parametrize("decision", [None, {}, "approve", {"action": "yes"}])
+    def test_mcp_elicitation_malformed_callback_decision_declines(self, decision):
+        client = FakeClient()
+        client.queue_server_request(
+            "mcpServer/elicitation/request",
+            request_id="elic-invalid",
+            threadId="t",
+            serverName="hermes-tools",
+            mode="form",
+            message="choose",
+            requestedSchema={"type": "object", "properties": {}},
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+
+        s = make_session(client, elicitation_callback=lambda _params: decision)
+        s.run_turn("hi", turn_timeout=1.0)
+
+        assert (
+            "elic-invalid",
+            {"action": "decline", "content": None, "_meta": None},
+        ) in client.responses
+
+    def test_mcp_elicitation_callback_exception_declines_without_logging_secret(
+        self, caplog
+    ):
+        client = FakeClient()
+        client.queue_server_request(
+            "mcpServer/elicitation/request",
+            request_id="elic-error",
+            threadId="t",
+            serverName="hermes-tools",
+            mode="form",
+            message="choose",
+            requestedSchema={"type": "object", "properties": {}},
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+
+        def fail(_params):
+            raise RuntimeError("never-log-this-secret")
+
+        s = make_session(client, elicitation_callback=fail)
+        s.run_turn("hi", turn_timeout=1.0)
+
+        assert (
+            "elic-error",
+            {"action": "decline", "content": None, "_meta": None},
+        ) in client.responses
+        assert "never-log-this-secret" not in caplog.text
 
     def test_mcp_elicitation_for_other_servers_declines(self):
         """For third-party MCP servers we decline by default so users
@@ -659,8 +876,8 @@ class TestSessionRetirement:
         tool result if codex goes silent)
       - <turn_aborted> raw marker as terminal (don't wait for turn/completed
         that never comes)
-      - OAuth refresh failure classification (suggest `codex login` instead
-        of raw RPC error strings)
+      - OAuth refresh failure classification (suggest Desktop reconnect
+        instead of raw RPC error strings)
       - dead subprocess detection between iterations
     """
 
@@ -846,7 +1063,7 @@ class TestSessionRetirement:
         s = make_session(client)
         r = s.run_turn("hi", turn_timeout=1.0)
         assert r.error is not None
-        assert "codex login" in r.error
+        assert "Agente Desktop Settings" in r.error
         assert r.should_retire is True
 
     def test_oauth_failure_from_stderr_on_turn_start_failure(self):
@@ -870,7 +1087,7 @@ class TestSessionRetirement:
         s = make_session(client)
         r = s.run_turn("hi", turn_timeout=1.0)
         assert r.error is not None
-        assert "codex login" in r.error
+        assert "Agente Desktop Settings" in r.error
         assert r.should_retire is True
 
     def test_oauth_failure_in_turn_completed_error(self):
@@ -888,7 +1105,7 @@ class TestSessionRetirement:
         r = s.run_turn("x", turn_timeout=1.0,
                        notification_poll_timeout=0.01)
         assert r.error is not None
-        assert "codex login" in r.error
+        assert "Agente Desktop Settings" in r.error
         assert r.should_retire is True
 
     def test_generic_turn_failure_does_not_trigger_oauth_hint(self):
@@ -906,7 +1123,7 @@ class TestSessionRetirement:
         r = s.run_turn("x", turn_timeout=1.0,
                        notification_poll_timeout=0.01)
         assert r.error is not None
-        assert "codex login" not in r.error
+        assert "Agente Desktop Settings" not in r.error
         assert "rate limit exceeded" in r.error
         # Generic model failures don't retire — the session itself is fine
         assert r.should_retire is False
@@ -928,7 +1145,7 @@ class TestSessionRetirement:
                        notification_poll_timeout=0.01)
         assert r.should_retire is True
         # Stderr-derived auth hint takes precedence over generic message
-        assert r.error and "codex login" in r.error
+        assert r.error and "Agente Desktop Settings" in r.error
 
 
 # ---- thread/start cross-fill ----
@@ -1016,7 +1233,7 @@ class TestClassifyOAuthFailure:
         )
         hint = _classify_oauth_failure("error: invalid_grant returned by server")
         assert hint is not None
-        assert "codex login" in hint
+        assert "Agente Desktop Settings" in hint
 
     def test_token_refresh_classified(self):
         from agent.transports.codex_app_server_session import (
@@ -1024,7 +1241,7 @@ class TestClassifyOAuthFailure:
         )
         hint = _classify_oauth_failure("token refresh failed: network error")
         assert hint is not None
-        assert "codex login" in hint
+        assert "Agente Desktop Settings" in hint
 
     def test_401_classified(self):
         from agent.transports.codex_app_server_session import (

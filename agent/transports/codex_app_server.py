@@ -1,9 +1,11 @@
-"""Codex app-server JSON-RPC client.
+"""Codex app-server request/notification client.
 
-Speaks the protocol documented in codex-rs/app-server/README.md (codex 0.125+).
-Transport is newline-delimited JSON-RPC 2.0 over stdio: spawn `codex app-server`,
-do an `initialize` handshake, then drive `thread/start` + `turn/start` and
-consume streaming `item/*` notifications until `turn/completed`.
+Speaks the protocol shipped by the Desktop-pinned Codex 0.144.1 app-server.
+Transport is newline-delimited JSON request/notification messages over stdio;
+the wire deliberately omits a ``jsonrpc`` member. Spawn `codex app-server`, do
+an `initialize` handshake, then drive `thread/start`/`thread/resume` plus
+`turn/start` and consume streaming `item/*` notifications until
+`turn/completed`.
 
 This module is the wire-level speaker only. Higher-level concerns (event
 projection into Hermes' display, approval bridging, transcript projection into
@@ -25,9 +27,64 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-# Default minimum codex version we test against. The PR sets this from the
-# `codex --version` parsed at install time; bumping is a one-line change here.
-MIN_CODEX_VERSION = (0, 125, 0)
+# Match the exact app-server release bundled by Agente Desktop. Hermes can also
+# launch a separately installed Codex CLI, but accepting an older wire version
+# would make the account/read + parameterless account/logout contract
+# conditional and reintroduce an untested auth path.
+MIN_CODEX_VERSION = (0, 144, 1)
+
+_PROVIDER_ENV_PREFIXES = (
+    "AGENTE_AI_GATEWAY_",
+    "AI_GATEWAY_",
+    "ANTHROPIC_",
+    "AZURE_",
+    "CEREBRAS_",
+    "COHERE_",
+    "DEEPSEEK_",
+    "FIREWORKS_",
+    "GEMINI_",
+    "GOOGLE_GENERATIVE_AI_",
+    "GROQ_",
+    "MISTRAL_",
+    "OPENAI_",
+    "OPENROUTER_",
+    "TOGETHER_",
+    "VERCEL_",
+    "XAI_",
+)
+
+
+def _scrub_provider_environment(environment: dict[str, str]) -> dict[str, str]:
+    """Remove inherited model-provider and shared-gateway configuration."""
+    blocked_exact = {
+        "AGENTE_API_KEY",
+        "CODEX_API_KEY",
+        "HERMES_API_KEY",
+        "HERMES_INFERENCE_API_KEY",
+        "HERMES_INFERENCE_BASE_URL",
+    }
+    return {
+        key: value
+        for key, value in environment.items()
+        if not key.upper().startswith(_PROVIDER_ENV_PREFIXES)
+        and key.upper() not in blocked_exact
+    }
+
+
+def _app_server_command(codex_bin: str, extra_args: list[str]) -> list[str]:
+    """Build argv for the packaged standalone server or the Codex CLI."""
+    if not isinstance(codex_bin, str) or not codex_bin.strip():
+        raise ValueError("codex_bin must be a non-empty string")
+    codex_bin = os.path.expanduser(codex_bin.strip())
+    if os.path.isabs(codex_bin):
+        if not os.path.isfile(codex_bin):
+            raise FileNotFoundError(f"codex app-server binary not found: {codex_bin}")
+        if not os.access(codex_bin, os.X_OK):
+            raise PermissionError(f"codex app-server binary is not executable: {codex_bin}")
+        return [codex_bin, "--session-source", "exec", *extra_args]
+    if os.sep in codex_bin or (os.altsep and os.altsep in codex_bin):
+        raise ValueError("codex_bin must be an absolute path or a command name")
+    return [codex_bin, "app-server", *extra_args]
 
 
 @dataclass
@@ -74,9 +131,9 @@ class CodexAppServerClient:
         env: Optional[dict[str, str]] = None,
     ) -> None:
         self._codex_bin = codex_bin
-        spawn_env = os.environ.copy()
+        spawn_env = _scrub_provider_environment(os.environ.copy())
         if env:
-            spawn_env.update(env)
+            spawn_env.update(_scrub_provider_environment(dict(env)))
         if codex_home:
             spawn_env["CODEX_HOME"] = codex_home
 
@@ -110,7 +167,7 @@ class CodexAppServerClient:
                 ]
             )
 
-        cmd = [codex_bin, "app-server"] + app_server_args
+        cmd = _app_server_command(codex_bin, app_server_args)
         # Codex emits tracing to stderr; default WARN keeps it quiet for users.
         spawn_env.setdefault("RUST_LOG", "warn")
 
@@ -164,6 +221,108 @@ class CodexAppServerClient:
         self._initialized = True
         return result
 
+    def account_read(
+        self,
+        *,
+        refresh_token: bool = False,
+        timeout: float = 30.0,
+    ) -> dict:
+        """Return the official app-server account snapshot.
+
+        The result is the unmodified ``account/read`` response with
+        ``account`` and ``requiresOpenaiAuth`` fields.  No Hermes auth store or
+        token parser participates in this call.
+        """
+        self._require_initialized("account/read")
+        if not isinstance(refresh_token, bool):
+            raise TypeError("refresh_token must be a bool")
+        return self.request(
+            "account/read",
+            {"refreshToken": refresh_token},
+            timeout=timeout,
+        )
+
+    def account_login_start(
+        self,
+        *,
+        device_code: bool = False,
+        use_hosted_login_success_page: Optional[bool] = None,
+        codex_streamlined_login: Optional[bool] = None,
+        app_brand: Optional[str] = None,
+        timeout: float = 30.0,
+    ) -> dict:
+        """Start Codex-managed ChatGPT login through the official method.
+
+        Browser login returns ``authUrl`` + ``loginId``.  Device-code login
+        returns ``verificationUrl`` + ``userCode`` + ``loginId``.  This helper
+        intentionally does not expose the protocol's internal
+        ``chatgptAuthTokens`` variant; clients must let Codex own credentials.
+        """
+        self._require_initialized("account/login/start")
+        if not isinstance(device_code, bool):
+            raise TypeError("device_code must be a bool")
+        if app_brand is not None and app_brand not in {"codex", "chatgpt"}:
+            raise ValueError("app_brand must be 'codex', 'chatgpt', or None")
+        browser_options = (
+            use_hosted_login_success_page,
+            codex_streamlined_login,
+            app_brand,
+        )
+        if device_code and any(option is not None for option in browser_options):
+            raise ValueError("browser login options cannot be used with device_code=True")
+
+        if device_code:
+            params: dict[str, Any] = {"type": "chatgptDeviceCode"}
+        else:
+            params = {"type": "chatgpt"}
+            if use_hosted_login_success_page is not None:
+                if not isinstance(use_hosted_login_success_page, bool):
+                    raise TypeError("use_hosted_login_success_page must be a bool or None")
+                params["useHostedLoginSuccessPage"] = use_hosted_login_success_page
+            if codex_streamlined_login is not None:
+                if not isinstance(codex_streamlined_login, bool):
+                    raise TypeError("codex_streamlined_login must be a bool or None")
+                params["codexStreamlinedLogin"] = codex_streamlined_login
+            if app_brand is not None:
+                params["appBrand"] = app_brand
+        return self.request("account/login/start", params, timeout=timeout)
+
+    def account_logout(self, *, timeout: float = 30.0) -> dict:
+        """Log out the account managed by the Codex app-server."""
+        self._require_initialized("account/logout")
+        return self.request("account/logout", timeout=timeout)
+
+    def model_list(
+        self,
+        *,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        include_hidden: Optional[bool] = None,
+        timeout: float = 30.0,
+    ) -> dict:
+        """Return one page from the official account-aware model catalog."""
+        self._require_initialized("model/list")
+        if cursor is not None and not isinstance(cursor, str):
+            raise TypeError("cursor must be a string or None")
+        if limit is not None and (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 0
+            or limit > 0xFFFFFFFF
+        ):
+            raise ValueError("limit must be a uint32 integer or None")
+        if include_hidden is not None and not isinstance(include_hidden, bool):
+            raise TypeError("include_hidden must be a bool or None")
+
+        params: dict[str, Any] = {}
+        if cursor is not None:
+            params["cursor"] = cursor
+        if limit is not None:
+            params["limit"] = limit
+        if include_hidden is not None:
+            params["includeHidden"] = include_hidden
+        return self.request("model/list", params, timeout=timeout)
+
     def close(self, timeout: float = 3.0) -> None:
         """Close stdin and wait for the subprocess to exit, escalating to kill."""
         if self._closed:
@@ -204,7 +363,10 @@ class CodexAppServerClient:
         q: queue.Queue = queue.Queue(maxsize=1)
         with self._pending_lock:
             self._pending[rid] = _Pending(queue=q, method=method)
-        self._send({"id": rid, "method": method, "params": params or {}})
+        payload: dict[str, Any] = {"id": rid, "method": method}
+        if params is not None:
+            payload["params"] = params
+        self._send(payload)
         try:
             msg = q.get(timeout=timeout)
         except queue.Empty:
@@ -224,7 +386,10 @@ class CodexAppServerClient:
 
     def notify(self, method: str, params: Optional[dict] = None) -> None:
         """Send a JSON-RPC notification (no id, no response expected)."""
-        self._send({"method": method, "params": params or {}})
+        payload: dict[str, Any] = {"method": method}
+        if params is not None:
+            payload["params"] = params
+        self._send(payload)
 
     def respond(self, request_id: Any, result: dict) -> None:
         """Reply to a server-initiated request (e.g. approval prompts)."""
@@ -279,6 +444,12 @@ class CodexAppServerClient:
         rid = self._next_id
         self._next_id += 1
         return rid
+
+    def _require_initialized(self, method: str) -> None:
+        if not self._initialized:
+            raise RuntimeError(
+                f"codex app-server must be initialized before {method}"
+            )
 
     def _send(self, obj: dict) -> None:
         if self._closed:

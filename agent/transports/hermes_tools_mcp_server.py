@@ -53,6 +53,22 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
+def _exact_official_route_markers() -> bool:
+    """Validate the non-secret route tuple inherited by this MCP child.
+
+    The callback is packaged exclusively for the standalone Codex app-server
+    route. Requiring both markers prevents an unrelated Hermes process from
+    starting this server and accidentally inheriting process-global provider
+    state or legacy OAuth behavior.
+    """
+    return (
+        os.getenv("HERMES_MAIN_RUNTIME_PROVIDER", "").strip().lower()
+        == "openai-codex"
+        and os.getenv("HERMES_MAIN_RUNTIME_API_MODE", "").strip().lower()
+        == "codex_app_server"
+    )
+
+
 # Tools we expose. Each name MUST match a registered Hermes tool that
 # `model_tools.handle_function_call()` can dispatch.
 #
@@ -128,8 +144,8 @@ def _build_server() -> Any:
             "Hermes Agent's tool surface, exposed for use inside a Codex "
             "session. Use these for capabilities Codex's built-in toolset "
             "doesn't cover: web search/extract, browser automation, "
-            "subagent delegation, vision, image generation, persistent "
-            "memory, skills, and cross-session search."
+            "vision, image generation, skills, text to speech, and "
+            "authorized Kanban coordination."
         ),
     )
 
@@ -161,6 +177,14 @@ def _build_server() -> Any:
         # which we can't get from a JSON schema at runtime).
         def _make_handler(tool_name: str):
             def _dispatch(**kwargs: Any) -> str:
+                if not _exact_official_route_markers():
+                    return json.dumps({
+                        "error": (
+                            "Hermes tools MCP refused the call because the exact "
+                            "openai-codex/codex_app_server route markers are absent."
+                        ),
+                        "tool": tool_name,
+                    })
                 try:
                     return handle_function_call(tool_name, kwargs or {})
                 except Exception as exc:
@@ -209,6 +233,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Quiet mode: keep Hermes' own banners off stdout (which is the MCP wire).
     os.environ.setdefault("HERMES_QUIET", "1")
     os.environ.setdefault("HERMES_REDACT_SECRETS", "true")
+
+    if not _exact_official_route_markers():
+        sys.stderr.write(
+            "hermes-tools MCP server refused to start: expected exact "
+            "HERMES_MAIN_RUNTIME_PROVIDER=openai-codex and "
+            "HERMES_MAIN_RUNTIME_API_MODE=codex_app_server markers\n"
+        )
+        return 2
 
     try:
         server = _build_server()

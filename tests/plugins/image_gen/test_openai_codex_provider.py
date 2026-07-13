@@ -35,6 +35,8 @@ def _b64_png() -> str:
 @pytest.fixture(autouse=True)
 def _tmp_hermes_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_MAIN_RUNTIME_PROVIDER", raising=False)
+    monkeypatch.delenv("HERMES_MAIN_RUNTIME_API_MODE", raising=False)
     yield tmp_path
 
 
@@ -89,11 +91,48 @@ class TestAvailability:
         monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: None)
         assert codex_plugin.OpenAICodexImageGenProvider().is_available() is False
 
+    def test_official_app_server_route_is_never_available(self, monkeypatch):
+        monkeypatch.setenv("HERMES_MAIN_RUNTIME_PROVIDER", "openai-codex")
+        monkeypatch.setenv("HERMES_MAIN_RUNTIME_API_MODE", "codex_app_server")
+        monkeypatch.setattr(
+            codex_plugin,
+            "_read_codex_access_token",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("token reader must not run")
+            ),
+        )
+
+        assert codex_plugin.OpenAICodexImageGenProvider().is_available() is False
+
 
 # ── Generate ────────────────────────────────────────────────────────────────
 
 
 class TestGenerate:
+    def test_official_route_fails_closed_before_token_or_network(self, provider, monkeypatch):
+        monkeypatch.setenv("HERMES_MAIN_RUNTIME_PROVIDER", "openai-codex")
+        monkeypatch.setenv("HERMES_MAIN_RUNTIME_API_MODE", "codex_app_server")
+        monkeypatch.setattr(
+            codex_plugin,
+            "_read_codex_access_token",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("token reader must not run")
+            ),
+        )
+        monkeypatch.setattr(
+            codex_plugin,
+            "_collect_image_b64",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("network path must not run")
+            ),
+        )
+
+        result = provider.generate("a cat")
+
+        assert result["success"] is False
+        assert result["error_type"] == "unsupported_route"
+        assert "standalone Codex app-server" in result["error"]
+
     def test_returns_auth_error_without_codex_token(self, provider, monkeypatch):
         monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: None)
         result = provider.generate("a cat")

@@ -371,16 +371,11 @@ def _run_review_in_thread(
             # "No LLM provider configured" warning at end of turn.
             _parent_runtime = agent._current_main_runtime()
             _parent_api_mode = _parent_runtime.get("api_mode") or None
-            # The review fork needs to call agent-loop tools (memory,
-            # skill_manage). Those tools require Hermes' own dispatch,
-            # which the codex_app_server runtime bypasses entirely
-            # (it runs the turn inside codex's subprocess). So when
-            # the parent is on codex_app_server, downgrade the review
-            # fork to codex_responses — same auth/credentials, but
-            # talks to the OpenAI Responses API directly so Hermes
-            # owns the loop and the agent-loop tools dispatch.
+            # The official app-server route is credentialless from Hermes'
+            # perspective. Never downgrade it to codex_responses: doing so
+            # would read or replay a Codex-owned subscription token.
             if _parent_api_mode == "codex_app_server":
-                _parent_api_mode = "codex_responses"
+                return
             # skip_memory=True keeps the review fork from
             # touching external memory plugins (honcho, mem0,
             # supermemory, etc.).  Without it, the fork's

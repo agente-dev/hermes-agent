@@ -39,12 +39,14 @@ def _jwt_with_claims(claims: dict) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
-    """Strip provider env vars so each test starts clean."""
+def _clean_auxiliary_runtime_state(monkeypatch):
+    """Strip provider state and route markers so each test starts clean."""
     for key in (
         "OPENROUTER_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY",
         "OPENAI_MODEL", "LLM_MODEL", "NOUS_INFERENCE_BASE_URL",
         "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+        "HERMES_MAIN_RUNTIME_PROVIDER", "HERMES_MAIN_RUNTIME_API_MODE",
+        "HERMES_MAIN_RUNTIME_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
     # Module-level unhealthy cache (10-min TTL) leaks between tests;
@@ -52,9 +54,11 @@ def _clean_env(monkeypatch):
     # cache for later ones, causing _resolve_auto to skip providers
     # that the test patched to return valid clients.
     import agent.auxiliary_client as _aux_mod
+    _aux_mod.clear_runtime_main()
     _aux_mod._aux_unhealthy_until.clear()
     _aux_mod._aux_unhealthy_logged_at.clear()
     yield
+    _aux_mod.clear_runtime_main()
     _aux_mod._aux_unhealthy_until.clear()
     _aux_mod._aux_unhealthy_logged_at.clear()
 
@@ -491,6 +495,112 @@ class TestBuildCodexClient:
         assert first_model == "gpt-5.4"
         assert second_model == "gpt-5.4"
         assert mock_openai.call_count == 2
+
+
+class TestOfficialCodexAppServerAuxiliaryBoundary:
+    """The official subscription route must never construct token clients."""
+
+    runtime = {
+        "provider": "openai-codex",
+        "model": "gpt-5.4",
+        "api_mode": "codex_app_server",
+    }
+
+    def test_explicit_runtime_blocks_every_provider_before_auth_resolution(self):
+        with (
+            patch(
+                "agent.auxiliary_client._read_codex_access_token",
+                side_effect=AssertionError("legacy token reader must not run"),
+            ),
+            patch(
+                "agent.auxiliary_client._try_openrouter",
+                side_effect=AssertionError("fallback provider must not run"),
+            ),
+            patch("agent.auxiliary_client.OpenAI") as mock_openai,
+        ):
+            client, model = resolve_provider_client(
+                "openrouter",
+                "anthropic/claude-sonnet-4",
+                main_runtime=self.runtime,
+            )
+
+        assert client is None
+        assert model is None
+        mock_openai.assert_not_called()
+
+    def test_child_route_markers_block_canonical_token_reader(self, monkeypatch):
+        monkeypatch.setenv("HERMES_MAIN_RUNTIME_PROVIDER", "openai-codex")
+        monkeypatch.setenv("HERMES_MAIN_RUNTIME_API_MODE", "codex_app_server")
+
+        with (
+            patch(
+                "agent.auxiliary_client._select_pool_entry",
+                side_effect=AssertionError("credential pool must not be read"),
+            ),
+            patch(
+                "hermes_cli.auth._read_codex_tokens",
+                side_effect=AssertionError("legacy auth store must not be read"),
+            ),
+        ):
+            assert _read_codex_access_token() is None
+
+    def test_process_runtime_blocks_codex_builder_and_vision_fallbacks(self):
+        import agent.auxiliary_client as aux
+
+        aux.set_runtime_main(
+            "openai-codex",
+            "gpt-5.4",
+            api_mode="codex_app_server",
+        )
+        try:
+            with (
+                patch(
+                    "agent.auxiliary_client._select_pool_entry",
+                    side_effect=AssertionError("credential pool must not be read"),
+                ),
+                patch(
+                    "agent.auxiliary_client._try_openrouter",
+                    side_effect=AssertionError("vision fallback must not run"),
+                ),
+            ):
+                assert aux._build_codex_client("gpt-5.4") == (None, None)
+                assert get_available_vision_backends() == []
+                assert resolve_vision_provider_client() == (None, None, None)
+        finally:
+            aux.clear_runtime_main()
+
+    def test_sync_call_fails_before_task_or_provider_resolution(self):
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            side_effect=AssertionError("task resolution must not run"),
+        ):
+            with pytest.raises(RuntimeError, match="standalone Codex app-server"):
+                call_llm(
+                    task="title_generation",
+                    main_runtime=self.runtime,
+                    messages=[{"role": "user", "content": "title"}],
+                )
+
+    @pytest.mark.asyncio
+    async def test_async_call_fails_before_task_or_provider_resolution(self):
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            side_effect=AssertionError("task resolution must not run"),
+        ):
+            with pytest.raises(RuntimeError, match="standalone Codex app-server"):
+                await async_call_llm(
+                    task="vision",
+                    main_runtime=self.runtime,
+                    messages=[{"role": "user", "content": "inspect"}],
+                )
+
+    def test_legacy_codex_responses_mode_is_not_overblocked(self):
+        import agent.auxiliary_client as aux
+
+        assert not aux._official_codex_app_server_active({
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+        })
 
 
 class TestResolveProviderClientUniversalModelFallback:
