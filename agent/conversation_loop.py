@@ -4992,7 +4992,6 @@ def run_conversation(
         "turn_exit_reason": _turn_exit_reason,
         "failed": failed,
         "partial": partial,
-        "error": turn_error,
         "interrupted": interrupted,
         "response_transformed": _response_transformed,
         "response_previewed": getattr(agent, "_response_was_previewed", False),
@@ -5013,6 +5012,8 @@ def run_conversation(
         "cost_source": agent.session_cost_source,
         "session_id": agent.session_id,
     }
+    if _is_official_codex or turn_error is not None:
+        result["error"] = turn_error
     if codex_thread_id:
         result["codex_thread_id"] = codex_thread_id
     if codex_turn_id:
