@@ -242,12 +242,6 @@ _VALID_API_MODES = {
     "codex_responses",
     "anthropic_messages",
     "bedrock_converse",
-    # Optional opt-in: hand the entire turn to a `codex app-server` subprocess
-    # so terminal/file-ops/patching/sandboxing run inside Codex's own runtime
-    # instead of Hermes' tool dispatch. Gated behind config key
-    # `model.openai_runtime == "codex_app_server"` AND provider in
-    # {"openai", "openai-codex"}. Default is unchanged.
-    "codex_app_server",
 }
 
 
@@ -260,30 +254,40 @@ def _parse_api_mode(raw: Any) -> Optional[str]:
     return None
 
 
-def _maybe_apply_codex_app_server_runtime(
+def _credentialless_codex_app_server_runtime(
     *,
-    provider: str,
-    api_mode: str,
+    requested_provider: str,
     model_cfg: Optional[Dict[str, Any]],
-) -> str:
-    """Optional opt-in: rewrite api_mode → "codex_app_server" for OpenAI/Codex
-    providers when the user has explicitly enabled that runtime via
-    `model.openai_runtime: codex_app_server` in config.yaml.
+) -> Optional[Dict[str, Any]]:
+    """Return the official Codex-owned runtime when explicitly selected.
 
-    Default behavior is preserved: when the key is unset, "auto", or empty,
-    this function is a no-op. Only providers in {"openai", "openai-codex"}
-    are eligible — other providers (anthropic, openrouter, etc.) cannot be
-    rerouted through codex.
+    ``codex app-server`` owns its account store and login lifecycle.  Hermes
+    must therefore choose this branch *before* resolving its legacy
+    ``openai-codex`` credential pool or replaying subscription OAuth tokens to
+    ``chatgpt.com/backend-api/codex``.  Keeping the returned credential fields
+    empty also prevents downstream callers from mistaking this runtime for the
+    custom Responses-API transport.
 
-    Returns the (possibly-rewritten) api_mode."""
-    if not model_cfg:
-        return api_mode
-    if provider not in {"openai", "openai-codex"}:
-        return api_mode
+    Only the ``openai-codex`` provider is eligible here.  Direct OpenAI API-key
+    traffic keeps its existing ``openai``/``codex_responses`` path.
+    """
+    if requested_provider != "openai-codex" or not model_cfg:
+        return None
+    configured_provider = str(model_cfg.get("provider") or "").strip().lower()
+    if configured_provider != "openai-codex":
+        return None
     runtime = str(model_cfg.get("openai_runtime") or "").strip().lower()
-    if runtime == "codex_app_server":
-        return "codex_app_server"
-    return api_mode
+    if runtime != "codex_app_server":
+        return None
+    return {
+        "provider": "openai-codex",
+        "api_mode": "codex_app_server",
+        "base_url": "",
+        "api_key": "",
+        "source": "codex-app-server",
+        "credential_pool": None,
+        "requested_provider": requested_provider,
+    }
 
 
 def _resolve_runtime_from_pool_entry(
@@ -405,12 +409,6 @@ def _resolve_runtime_from_pool_entry(
     # https://opencode.ai/zen/go/v1/messages instead of .../v1/v1/messages).
     if api_mode == "anthropic_messages" and provider in {"opencode-zen", "opencode-go"}:
         base_url = re.sub(r"/v1/?$", "", base_url)
-
-    # Optional opt-in: route OpenAI/Codex turns through `codex app-server`.
-    # Inert when `model.openai_runtime` is unset or "auto".
-    api_mode = _maybe_apply_codex_app_server_runtime(
-        provider=provider, api_mode=api_mode, model_cfg=model_cfg
-    )
 
     return {
         "provider": provider,
@@ -1221,6 +1219,19 @@ def resolve_runtime_provider(
     behavior (api_mode derived from config).
     """
     requested_provider = resolve_requested_provider(requested)
+    model_cfg = _get_model_config()
+
+    # The official app-server runtime authenticates through Codex's own account
+    # store.  Resolve it before custom-provider lookup, canonical provider
+    # resolution, credential-pool selection, or Hermes OAuth-token refresh.
+    # Explicit api_key/base_url arguments are intentionally ignored on this
+    # branch: selecting ``codex_app_server`` means Codex owns auth end-to-end.
+    codex_app_server_runtime = _credentialless_codex_app_server_runtime(
+        requested_provider=requested_provider,
+        model_cfg=model_cfg,
+    )
+    if codex_app_server_runtime is not None:
+        return codex_app_server_runtime
 
     # Azure Anthropic short-circuit: when explicitly targeting an Azure endpoint
     # with provider="anthropic", bypass _resolve_named_custom_runtime (which would
@@ -1271,7 +1282,6 @@ def resolve_runtime_provider(
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
     )
-    model_cfg = _get_model_config()
     explicit_runtime = _resolve_explicit_runtime(
         provider=provider,
         requested_provider=requested_provider,

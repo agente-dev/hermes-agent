@@ -35,13 +35,23 @@ def run_codex_app_server_turn(
     should_review_memory: bool = False,
 ) -> Dict[str, Any]:
     """Codex app-server runtime path. Hands the entire turn to a `codex
-    app-server` subprocess and projects its events back into Hermes'
-    messages list so memory/skill review keep working.
+    app-server` subprocess and projects its events back into Hermes' messages
+    list for ordinary session persistence and finalization. Hermes auxiliary
+    model work is intentionally disabled on this route.
 
     Called from run_conversation() when agent.api_mode == "codex_app_server".
     Returns the same dict shape as the chat_completions path.
     """
     from agent.transports.codex_app_server_session import CodexAppServerSession
+
+    if (
+        getattr(agent, "provider", None) != "openai-codex"
+        or getattr(agent, "api_mode", None) != "codex_app_server"
+    ):
+        raise RuntimeError(
+            "official Codex runtime requires the exact "
+            "openai-codex/codex_app_server route"
+        )
 
     # Lazy session: one CodexAppServerSession per AIAgent instance.
     # Spawned on first turn, reused across turns, closed at AIAgent
@@ -56,9 +66,43 @@ def run_codex_app_server_turn(
             approval_callback = _get_approval_callback()
         except Exception:
             approval_callback = None
+        # Bind the spawned Codex process (and any stdio MCP child it starts)
+        # to the originating gateway lane.  This is a per-subprocess overlay;
+        # never write the session key to process-global ``os.environ`` because
+        # gateway turns can run concurrently.
+        child_env: dict[str, str] = {}
+        gateway_session_key = getattr(agent, "_gateway_session_key", None)
+        if gateway_session_key:
+            child_env["HERMES_SESSION_KEY"] = str(gateway_session_key)
+        selected_model = str(getattr(agent, "model", "") or "").strip()
+        resume_thread_id = None
+        session_db = getattr(agent, "_session_db", None)
+        session_id = str(getattr(agent, "session_id", "") or "").strip()
+        if session_db is not None and session_id:
+            try:
+                resume_thread_id = session_db.get_codex_app_server_thread_id(
+                    session_id
+                )
+            except Exception:
+                logger.warning(
+                    "could not read Codex thread linkage for Hermes session",
+                    exc_info=True,
+                )
+        child_env.update(
+            {
+                "HERMES_MAIN_RUNTIME_PROVIDER": "openai-codex",
+                "HERMES_MAIN_RUNTIME_API_MODE": "codex_app_server",
+                "HERMES_MAIN_RUNTIME_MODEL": selected_model,
+            }
+        )
         agent._codex_session = CodexAppServerSession(
             cwd=cwd,
+            codex_bin=os.getenv("CODEX_APP_SERVER_BIN", "").strip() or "codex",
+            codex_home=os.getenv("CODEX_HOME", "").strip() or None,
+            model=selected_model,
+            resume_thread_id=resume_thread_id,
             approval_callback=approval_callback,
+            child_env=child_env,
         )
 
     # NOTE: the user message is ALREADY appended to messages by the
@@ -79,7 +123,9 @@ def run_codex_app_server_turn(
         return {
             "final_response": (
                 f"Codex app-server turn failed: {exc}. "
-                f"Fall back to default runtime with `/codex-runtime auto`."
+                "Reconnect OpenAI in Agente Desktop Settings, then retry. "
+                "The official ChatGPT subscription route will not fall back "
+                "to another provider."
             ),
             "messages": messages,
             "api_calls": 0,
@@ -87,6 +133,21 @@ def run_codex_app_server_turn(
             "partial": True,
             "error": str(exc),
         }
+
+    if turn.thread_id:
+        session_db = getattr(agent, "_session_db", None)
+        session_id = str(getattr(agent, "session_id", "") or "").strip()
+        if session_db is not None and session_id:
+            try:
+                session_db.set_codex_app_server_thread_id(
+                    session_id,
+                    turn.thread_id,
+                )
+            except Exception:
+                logger.warning(
+                    "could not persist Codex thread linkage for Hermes session",
+                    exc_info=True,
+                )
 
     # If the turn signalled the underlying client is wedged (deadline
     # blown, post-tool watchdog tripped, OAuth refresh died, subprocess
@@ -121,46 +182,6 @@ def run_codex_app_server_turn(
         getattr(agent, "_iters_since_skill", 0) + turn.tool_iterations
     )
 
-    # Now check the skill nudge AFTER iters were incremented — same
-    # pattern the chat_completions path uses (line ~15432).
-    should_review_skills = False
-    if (
-        agent._skill_nudge_interval > 0
-        and agent._iters_since_skill >= agent._skill_nudge_interval
-        and "skill_manage" in agent.valid_tool_names
-    ):
-        should_review_skills = True
-        agent._iters_since_skill = 0
-
-    # External memory provider sync (mirrors line ~15439). Skipped on
-    # interrupt/error to avoid feeding partial transcripts to memory.
-    if not turn.interrupted and turn.error is None:
-        try:
-            agent._sync_external_memory_for_turn(
-                original_user_message=original_user_message,
-                final_response=turn.final_text,
-                interrupted=False,
-            )
-        except Exception:
-            logger.debug("external memory sync raised", exc_info=True)
-
-    # Background review fork — same cadence + signature as the default
-    # path (line ~15449). Only fires when a trigger actually tripped AND
-    # we have a real final response.
-    if (
-        turn.final_text
-        and not turn.interrupted
-        and (should_review_memory or should_review_skills)
-    ):
-        try:
-            agent._spawn_background_review(
-                messages_snapshot=list(messages),
-                review_memory=should_review_memory,
-                review_skills=should_review_skills,
-            )
-        except Exception:
-            logger.debug("background review spawn raised", exc_info=True)
-
     return {
         "final_response": turn.final_text,
         "messages": messages,
@@ -168,6 +189,7 @@ def run_codex_app_server_turn(
         "completed": not turn.interrupted and turn.error is None,
         "partial": turn.interrupted or turn.error is not None,
         "error": turn.error,
+        "interrupted": turn.interrupted,
         "codex_thread_id": turn.thread_id,
         "codex_turn_id": turn.turn_id,
     }

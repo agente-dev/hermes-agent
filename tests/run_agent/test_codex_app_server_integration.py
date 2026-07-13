@@ -12,12 +12,19 @@ Verifies that:
 
 from __future__ import annotations
 
-from unittest.mock import patch
+import os
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import run_agent
 from agent.transports.codex_app_server_session import CodexAppServerSession, TurnResult
+
+
+@pytest.fixture(autouse=True)
+def writable_hermes_home(monkeypatch, tmp_path):
+    """Keep integration logs inside the test sandbox."""
+    monkeypatch.setattr(run_agent, "_hermes_home", tmp_path / "hermes")
 
 
 @pytest.fixture
@@ -49,15 +56,15 @@ def fake_session(monkeypatch):
     )
 
 
-def _make_codex_agent():
+def _make_codex_agent(*, gateway_session_key=None, session_db=None):
     """Construct an AIAgent in codex_app_server mode without contacting any
     real provider. We pass api_mode explicitly so the constructor takes the
-    fast path for direct credentials."""
+    credentialless official-runtime branch."""
     return run_agent.AIAgent(
-        api_key="stub",
-        base_url="https://stub.invalid",
-        provider="openai",
+        provider="openai-codex",
         api_mode="codex_app_server",
+        gateway_session_key=gateway_session_key,
+        session_db=session_db,
         quiet_mode=True,
         skip_context_files=True,
         skip_memory=True,
@@ -68,6 +75,37 @@ class TestApiModeAccepted:
     def test_api_mode_is_codex_app_server(self):
         agent = _make_codex_agent()
         assert agent.api_mode == "codex_app_server"
+
+    def test_official_runtime_constructs_no_openai_client_or_credential(self):
+        agent = _make_codex_agent()
+
+        assert agent.client is None
+        assert agent.api_key == ""
+        assert agent.base_url == ""
+
+    @pytest.mark.parametrize("provider", ["openai", "openrouter", None])
+    def test_inexact_provider_pair_is_rejected(self, provider):
+        with pytest.raises(ValueError, match="requires provider='openai-codex'"):
+            run_agent.AIAgent(
+                provider=provider,
+                api_mode="codex_app_server",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+    def test_legacy_credential_pool_is_not_retained(self):
+        pool = object()
+        agent = run_agent.AIAgent(
+            provider="openai-codex",
+            api_mode="codex_app_server",
+            credential_pool=pool,
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+        assert agent._credential_pool is None
 
 
 class TestRunConversationCodexPath:
@@ -145,12 +183,10 @@ class TestRunConversationCodexPath:
         # args after every turn, which would crash with TypeError).
         assert not spawn.called
 
-    def test_background_review_skill_trigger_fires_above_threshold(
+    def test_background_review_skill_trigger_is_skipped_for_official_route(
         self, monkeypatch
     ):
-        """When tool iterations cross the skill nudge interval, the
-        background review fires with review_skills=True and the right
-        messages_snapshot signature."""
+        """The official route never downgrades into a token-replay review."""
         from agent.transports.codex_app_server_session import (
             CodexAppServerSession, TurnResult,
         )
@@ -181,23 +217,12 @@ class TestRunConversationCodexPath:
                           return_value=None) as spawn:
             agent.run_conversation("do tool work")
 
-        assert spawn.called, "skill threshold tripped but review didn't fire"
-        # Verify the call signature matches what _spawn_background_review
-        # actually expects — this is the regression guard for the original
-        # bug where the codex path called it with no args at all.
-        call = spawn.call_args
-        assert "messages_snapshot" in call.kwargs
-        assert isinstance(call.kwargs["messages_snapshot"], list)
-        assert call.kwargs["review_skills"] is True
-        # Counter should be reset after the review fires
-        assert agent._iters_since_skill == 0
+        assert not spawn.called
+        assert agent._iters_since_skill == 10
 
-    def test_background_review_signature_never_breaks(self, fake_session):
-        """Even when no trigger fires, the helper must never call
-        _spawn_background_review with the wrong signature. Run a turn,
-        then run another turn after manually tripping the skill counter
-        and confirm the call shape is the kwargs-only form the function
-        actually accepts."""
+    def test_background_review_never_spawns_when_threshold_trips(
+        self, fake_session
+    ):
         agent = _make_codex_agent()
         agent._skill_nudge_interval = 1  # very low so any iter trips it
         agent._iters_since_skill = 0
@@ -207,21 +232,10 @@ class TestRunConversationCodexPath:
         with patch.object(agent, "_spawn_background_review",
                           return_value=None) as spawn:
             agent.run_conversation("first")
-        # The fake session reports tool_iterations=1, which trips
-        # _skill_nudge_interval=1. So review should fire.
-        assert spawn.called
-        # Critical invariant: positional args must be empty, all real
-        # args must be kwargs (matching _spawn_background_review's
-        # actual signature).
-        call = spawn.call_args
-        assert call.args == (), (
-            f"expected no positional args, got {call.args!r} — "
-            "would crash _spawn_background_review at runtime"
-        )
-        assert "messages_snapshot" in call.kwargs
+        assert not spawn.called
 
     def test_chat_completions_loop_is_not_entered(self, fake_session):
-        """The early-return must bypass the regular API call loop entirely.
+        """The official route must bypass the regular API call loop entirely.
         We confirm by patching the SDK call and asserting it's never invoked."""
         agent = _make_codex_agent()
         # The chat_completions loop calls self.client.chat.completions.create(...)
@@ -232,76 +246,100 @@ class TestRunConversationCodexPath:
             agent.run_conversation("hi")
         assert not client_mock.chat.completions.create.called
 
-
-class TestReviewForkApiModeDowngrade:
-    """When the parent agent runs on codex_app_server, the background
-    review fork must downgrade to codex_responses — otherwise the fork
-    can't dispatch agent-loop tools (memory, skill_manage) which is the
-    whole point of the review."""
-
-    def test_codex_app_server_parent_downgrades_review_fork(self):
-        """Live test against the real _spawn_background_review code path:
-        verify the review_agent gets api_mode=codex_responses when the
-        parent is codex_app_server."""
-        from unittest.mock import MagicMock, patch as _patch
+    def test_official_route_skips_hermes_preflight_compression(
+        self, fake_session
+    ):
         agent = _make_codex_agent()
-        # Pretend memory + skills are configured so the review fork
-        # reaches the AIAgent constructor.
-        agent._memory_store = MagicMock()
-        agent._memory_enabled = True
-        agent._user_profile_enabled = True
-        # Mock _current_main_runtime to return the parent's codex_app_server
-        # state so we can confirm the helper detects + downgrades it.
-        agent._current_main_runtime = lambda: {
-            "api_mode": "codex_app_server",
-            "base_url": "https://chatgpt.com/backend-api/codex",
-            "api_key": "stub-token",
+        agent.compression_enabled = True
+        agent.context_compressor.protect_first_n = 0
+        agent.context_compressor.protect_last_n = 0
+        history = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 100}
+            for i in range(8)
+        ]
+
+        with patch.object(
+            agent,
+            "_compress_context",
+            side_effect=AssertionError("official route must not compress via Hermes"),
+        ) as compress:
+            result = agent.run_conversation(
+                "new message",
+                conversation_history=history,
+            )
+
+        compress.assert_not_called()
+        assert result["completed"] is True
+
+    def test_official_route_rejoins_common_persistence_and_cleanup(
+        self, fake_session
+    ):
+        agent = _make_codex_agent()
+
+        with patch.object(agent, "_save_trajectory") as save, patch.object(
+            agent, "_cleanup_task_resources"
+        ) as cleanup, patch.object(agent, "_persist_session") as persist:
+            result = agent.run_conversation("persist this turn")
+
+        save.assert_called_once()
+        cleanup.assert_called_once()
+        persist.assert_called_once()
+        assert result["turn_exit_reason"] == "codex_app_server_completed"
+        assert result["codex_thread_id"] == "thread-stub-1"
+        assert result["codex_turn_id"] == "turn-stub-1"
+
+    def test_codex_thread_linkage_is_loaded_and_persisted(self, fake_session):
+        session_db = MagicMock()
+        session_db.get_session.return_value = None
+        session_db.get_codex_app_server_thread_id.return_value = "thread-existing"
+        agent = _make_codex_agent(session_db=session_db)
+
+        result = agent.run_conversation("resume official conversation")
+
+        assert agent._codex_session._resume_thread_id == "thread-existing"
+        session_db.get_codex_app_server_thread_id.assert_called_once_with(
+            agent.session_id
+        )
+        session_db.set_codex_app_server_thread_id.assert_called_once_with(
+            agent.session_id,
+            "thread-stub-1",
+        )
+        assert result["codex_thread_id"] == "thread-stub-1"
+
+    def test_gateway_session_key_is_scoped_to_codex_child(
+        self, fake_session, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_SESSION_KEY", "other-concurrent-session")
+        agent = _make_codex_agent(
+            gateway_session_key="agent:desktop:account:user-1"
+        )
+
+        with patch.object(agent, "_spawn_background_review", return_value=None):
+            agent.run_conversation("hi")
+
+        assert agent._codex_session._child_env == {
+            "HERMES_SESSION_KEY": "agent:desktop:account:user-1",
+            "HERMES_MAIN_RUNTIME_PROVIDER": "openai-codex",
+            "HERMES_MAIN_RUNTIME_API_MODE": "codex_app_server",
+            "HERMES_MAIN_RUNTIME_MODEL": agent.model,
         }
-        # Capture what AIAgent gets constructed with inside the helper.
-        captured = {}
+        assert os.environ["HERMES_SESSION_KEY"] == "other-concurrent-session"
 
-        def _capture_init(self, **kwargs):
-            captured.update(kwargs)
-            # Set bare attributes the rest of the spawn function reads
-            # so it can finish without exploding.
-            self.api_mode = kwargs.get("api_mode")
-            self.provider = kwargs.get("provider")
-            self.model = kwargs.get("model")
-            self._memory_write_origin = None
-            self._memory_write_context = None
-            self._memory_store = None
-            self._memory_enabled = False
-            self._user_profile_enabled = False
-            self._memory_nudge_interval = 0
-            self._skill_nudge_interval = 0
-            self.suppress_status_output = False
-            self._session_messages = []
 
-            def _no_op_run_conv(*a, **kw):
-                return {"final_response": "", "messages": []}
-            self.run_conversation = _no_op_run_conv
+class TestReviewForkIsolation:
+    """Official subscription turns never create a legacy review fork."""
 
-            def _no_op_close(*a, **kw):
-                return None
-            self.close = _no_op_close
-
-        with _patch("run_agent.AIAgent.__init__", _capture_init):
+    def test_codex_app_server_parent_skips_review_fork(self):
+        from unittest.mock import patch as _patch
+        agent = _make_codex_agent()
+        with _patch("run_agent.threading.Thread") as thread:
             agent._spawn_background_review(
                 messages_snapshot=[{"role": "user", "content": "x"}],
                 review_memory=True,
                 review_skills=False,
             )
-            # Wait for the spawned thread to actually execute
-            import time
-            for _ in range(30):
-                if "api_mode" in captured:
-                    break
-                time.sleep(0.1)
 
-        assert captured.get("api_mode") == "codex_responses", (
-            f"review fork should be downgraded to codex_responses when "
-            f"parent is codex_app_server; got {captured.get('api_mode')!r}"
-        )
+        thread.assert_not_called()
 
 
 class TestErrorHandling:
@@ -319,7 +357,9 @@ class TestErrorHandling:
         assert result["completed"] is False
         assert result["partial"] is True
         assert "subprocess died" in result["error"]
-        assert "codex-runtime auto" in result["final_response"]
+        assert "Reconnect OpenAI in Agente Desktop Settings" in result["final_response"]
+        assert "will not fall back" in result["final_response"]
+        assert "codex-runtime auto" not in result["final_response"]
 
     def test_interrupted_turn_marked_partial(self, monkeypatch):
         def interrupted_turn(self, user_input, **kwargs):
@@ -342,6 +382,8 @@ class TestErrorHandling:
         assert result["completed"] is False
         assert result["partial"] is True
         assert result["error"] == "user interrupted"
+        assert result["interrupted"] is True
+        assert result["turn_exit_reason"] == "codex_app_server_interrupted"
 
 
 class TestSessionRetirementOnRunAgent:

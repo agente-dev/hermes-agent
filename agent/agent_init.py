@@ -279,7 +279,10 @@ def init_agent(
     agent.skip_context_files = skip_context_files
     agent.load_soul_identity = load_soul_identity
     agent.pass_session_id = pass_session_id
-    agent._credential_pool = credential_pool
+    # Assigned after the runtime pair is validated below. The official Codex
+    # route must never retain a legacy Hermes credential pool, even if a
+    # compatibility caller passes one.
+    agent._credential_pool = None
     agent.log_prefix_chars = log_prefix_chars
     agent.log_prefix = f"{log_prefix} " if log_prefix else ""
     # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
@@ -320,6 +323,15 @@ def init_agent(
         agent.api_mode = "bedrock_converse"
     else:
         agent.api_mode = "chat_completions"
+
+    if agent.api_mode == "codex_app_server":
+        if agent.provider != "openai-codex":
+            raise ValueError(
+                "codex_app_server requires provider='openai-codex'"
+            )
+        agent._credential_pool = None
+    else:
+        agent._credential_pool = credential_pool
 
     # Eagerly warm the transport cache so import errors surface at init,
     # not mid-conversation.  Also validates the api_mode is registered.
@@ -660,6 +672,16 @@ def init_agent(
                     print("🔑 Using credentials: Microsoft Entra ID")
                 elif isinstance(effective_key, str) and len(effective_key) > 12:
                     print(f"🔑 Using token: {effective_key[:8]}...{effective_key[-4:]}")
+    elif agent.api_mode == "codex_app_server":
+        # Official Codex runtime: the spawned ``codex app-server`` process
+        # owns account discovery, login, token refresh, and model transport.
+        # Do not construct an OpenAI client and do not retain any legacy
+        # Hermes subscription token/API key that a compatibility caller may
+        # have supplied alongside this api_mode.
+        agent.api_key = ""
+        agent.base_url = ""
+        agent.client = None
+        agent._client_kwargs = {}
     elif agent.api_mode == "bedrock_converse":
         # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
         # Region is extracted from the base_url or defaults to us-east-1.

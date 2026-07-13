@@ -1,5 +1,6 @@
 """Tests for hermes_state.py — SessionDB SQLite CRUD, FTS5 search, export."""
 
+import json
 import sqlite3
 import time
 import pytest
@@ -127,6 +128,30 @@ class TestSessionLifecycle:
 
         session = db.get_session("s1")
         assert session["system_prompt"] == "You are a helpful assistant."
+
+    def test_codex_thread_linkage_merges_without_credentials(self, db):
+        db.create_session(
+            session_id="s1",
+            source="cli",
+            model_config={"max_iterations": 10},
+        )
+
+        db.set_codex_app_server_thread_id("s1", "thread-123")
+
+        assert db.get_codex_app_server_thread_id("s1") == "thread-123"
+        stored = json.loads(db.get_session("s1")["model_config"])
+        assert stored == {
+            "max_iterations": 10,
+            "_codex_app_server_thread_id": "thread-123",
+        }
+        assert all("token" not in key.lower() for key in stored)
+
+    def test_codex_thread_linkage_can_clear_stale_mapping(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.set_codex_app_server_thread_id("s1", "thread-stale")
+        db.set_codex_app_server_thread_id("s1", None)
+
+        assert db.get_codex_app_server_thread_id("s1") is None
 
     def test_update_token_counts(self, db):
         db.create_session(session_id="s1", source="cli")

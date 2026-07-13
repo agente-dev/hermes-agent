@@ -502,6 +502,8 @@ class TestMigrate:
         # Must include startup + tool timeouts so codex doesn't give up
         assert "startup_timeout_sec" in text
         assert "tool_timeout_sec" in text
+        assert 'HERMES_MAIN_RUNTIME_PROVIDER = "openai-codex"' in text
+        assert 'HERMES_MAIN_RUNTIME_API_MODE = "codex_app_server"' in text
         # And the entry is reported
         assert "hermes-tools" in report.migrated
 

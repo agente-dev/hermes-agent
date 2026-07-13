@@ -697,6 +697,10 @@ def run_conversation(
         _restore_or_build_system_prompt(agent, system_message, conversation_history)
 
     active_system_prompt = agent._cached_system_prompt
+    _is_official_codex = (
+        agent.provider == "openai-codex"
+        and agent.api_mode == "codex_app_server"
+    )
 
     # ── Preflight context compression ──
     # Before entering the main loop, check if the loaded conversation
@@ -706,7 +710,8 @@ def run_conversation(
     # than waiting for an API error (which might be caught as a non-retryable
     # 4xx and abort the request entirely).
     if (
-        agent.compression_enabled
+        not _is_official_codex
+        and agent.compression_enabled
         and len(messages) > agent.context_compressor.protect_first_n
                             + agent.context_compressor.protect_last_n + 1
     ):
@@ -841,6 +846,10 @@ def run_conversation(
     final_response = None
     interrupted = False
     failed = False
+    partial = False
+    turn_error = None
+    codex_thread_id = None
+    codex_turn_id = None
     codex_ack_continuations = 0
     length_continue_retries = 0
     truncated_tool_call_retries = 0
@@ -900,16 +909,36 @@ def run_conversation(
     # all run inside Codex). Default Hermes path is bypassed entirely.
     # See agent/transports/codex_app_server_session.py for the adapter
     # and references/codex-app-server-runtime.md for the rationale.
-    if agent.api_mode == "codex_app_server":
-        return agent._run_codex_app_server_turn(
+    if _is_official_codex:
+        codex_result = agent._run_codex_app_server_turn(
             user_message=user_message,
             original_user_message=original_user_message,
             messages=messages,
             effective_task_id=effective_task_id,
             should_review_memory=_should_review_memory,
         )
+        final_response = codex_result.get("final_response")
+        api_call_count = int(codex_result.get("api_calls") or 0)
+        interrupted = bool(codex_result.get("interrupted"))
+        partial = bool(codex_result.get("partial"))
+        turn_error = codex_result.get("error")
+        failed = bool(turn_error) and not interrupted
+        codex_thread_id = codex_result.get("codex_thread_id")
+        codex_turn_id = codex_result.get("codex_turn_id")
+        if interrupted:
+            _turn_exit_reason = "codex_app_server_interrupted"
+        elif turn_error:
+            _turn_exit_reason = "codex_app_server_error"
+        else:
+            _turn_exit_reason = "codex_app_server_completed"
 
-    while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+    while (
+        not _is_official_codex
+        and (
+            (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0)
+            or agent._budget_grace_call
+        )
+    ):
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
 
@@ -4677,7 +4706,7 @@ def run_conversation(
                 messages.append({"role": "assistant", "content": final_response})
                 break
     
-    if final_response is None and (
+    if not _is_official_codex and final_response is None and (
         api_call_count >= agent.max_iterations
         or agent.iteration_budget.remaining <= 0
     ):
@@ -4749,11 +4778,15 @@ def run_conversation(
                 )
 
     # Determine if conversation completed successfully
-    completed = (
-        final_response is not None
-        and api_call_count < agent.max_iterations
-        and not failed
-    )
+    if _is_official_codex:
+        completed = bool(codex_result.get("completed"))
+    else:
+        completed = (
+            final_response is not None
+            and api_call_count < agent.max_iterations
+            and not failed
+            and not interrupted
+        )
 
     # Save trajectory if enabled.  ``user_message`` may be a multimodal
     # list of parts; the trajectory format wants a plain string.
@@ -4958,7 +4991,8 @@ def run_conversation(
         "completed": completed,
         "turn_exit_reason": _turn_exit_reason,
         "failed": failed,
-        "partial": False,  # True only when stopped due to invalid tool calls
+        "partial": partial,
+        "error": turn_error,
         "interrupted": interrupted,
         "response_transformed": _response_transformed,
         "response_previewed": getattr(agent, "_response_was_previewed", False),
@@ -4979,6 +5013,10 @@ def run_conversation(
         "cost_source": agent.session_cost_source,
         "session_id": agent.session_id,
     }
+    if codex_thread_id:
+        result["codex_thread_id"] = codex_thread_id
+    if codex_turn_id:
+        result["codex_turn_id"] = codex_turn_id
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
     # If a /steer landed after the final assistant turn (no more tool
@@ -5001,7 +5039,8 @@ def run_conversation(
 
     # Check skill trigger NOW — based on how many tool iterations THIS turn used.
     _should_review_skills = False
-    if (agent._skill_nudge_interval > 0
+    if (not _is_official_codex
+            and agent._skill_nudge_interval > 0
             and agent._iters_since_skill >= agent._skill_nudge_interval
             and "skill_manage" in agent.valid_tool_names):
         _should_review_skills = True
@@ -5017,7 +5056,12 @@ def run_conversation(
 
     # Background memory/skill review — runs AFTER the response is delivered
     # so it never competes with the user's task for model attention.
-    if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+    if (
+        not _is_official_codex
+        and final_response
+        and not interrupted
+        and (_should_review_memory or _should_review_skills)
+    ):
         try:
             agent._spawn_background_review(
                 messages_snapshot=list(messages),

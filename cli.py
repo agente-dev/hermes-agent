@@ -4867,13 +4867,30 @@ class HermesCLI:
         resolved_acp_command = runtime.get("command")
         resolved_acp_args = list(runtime.get("args") or [])
         resolved_credential_pool = runtime.get("credential_pool")
+        _is_codex_app_server = (
+            resolved_provider == "openai-codex"
+            and resolved_api_mode == "codex_app_server"
+        )
+        if (
+            resolved_api_mode == "codex_app_server"
+            and resolved_provider != "openai-codex"
+        ):
+            print(
+                "\n⚠️  Invalid runtime: codex_app_server requires "
+                "provider openai-codex."
+            )
+            return False
         # A callable api_key is a bearer-token provider (Azure Foundry
         # Entra ID — ``azure_identity_adapter.build_token_provider``).
         # The OpenAI SDK accepts ``Callable[[], str]`` for ``api_key`` and
         # invokes it before every request. Skip the string-only validation
         # and placeholder substitution for callables.
         _is_callable_provider = callable(api_key) and not isinstance(api_key, str)
-        if not _is_callable_provider and (not isinstance(api_key, str) or not api_key):
+        if (
+            not _is_codex_app_server
+            and not _is_callable_provider
+            and (not isinstance(api_key, str) or not api_key)
+        ):
             # Custom / local endpoints (llama.cpp, ollama, vLLM, etc.) often
             # don't require authentication.  When a base_url IS configured but
             # no API key was found, use a placeholder so the OpenAI SDK
@@ -4891,10 +4908,19 @@ class HermesCLI:
                 print("\n⚠️  Provider resolver returned an empty API key. "
                       "Set OPENROUTER_API_KEY or run: hermes setup")
                 return False
-        if not isinstance(base_url, str) or not base_url:
+        if (
+            not _is_codex_app_server
+            and (not isinstance(base_url, str) or not base_url)
+        ):
             print("\n⚠️  Provider resolver returned an empty base URL. "
                   "Check your provider config or run: hermes setup")
             return False
+
+        if _is_codex_app_server:
+            # Codex owns auth and transport; keep the CLI route explicitly
+            # credentialless instead of manufacturing an SDK placeholder.
+            api_key = ""
+            base_url = ""
 
         credentials_changed = api_key != self.api_key or base_url != self.base_url
         routing_changed = (

@@ -7,19 +7,19 @@ covered by a separate live test gated on `codex --version`.
 
 from __future__ import annotations
 
+from unittest.mock import Mock, call
+
 import pytest
 
-from hermes_cli.runtime_provider import (
-    _VALID_API_MODES,
-    _maybe_apply_codex_app_server_runtime,
-)
+from hermes_cli import runtime_provider as runtime_provider_mod
+from hermes_cli.runtime_provider import _VALID_API_MODES
 
 
 class TestApiModeRegistration:
-    """The new api_mode must be registered or downstream parsing rejects it."""
+    """The official runtime is not a generic endpoint api_mode."""
 
-    def test_codex_app_server_is_a_valid_api_mode(self) -> None:
-        assert "codex_app_server" in _VALID_API_MODES
+    def test_codex_app_server_is_not_a_generic_api_mode(self) -> None:
+        assert "codex_app_server" not in _VALID_API_MODES
 
     def test_existing_api_modes_still_present(self) -> None:
         # Regression guard: don't accidentally delete other api_modes when
@@ -33,75 +33,86 @@ class TestApiModeRegistration:
             assert mode in _VALID_API_MODES
 
 
-class TestMaybeApplyCodexAppServerRuntime:
-    """The opt-in helper that rewrites api_mode → codex_app_server."""
+class TestCredentiallessRuntimeResolution:
+    def test_openai_codex_app_server_skips_all_hermes_credentials(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            runtime_provider_mod,
+            "_get_model_config",
+            lambda: {
+                "provider": "openai-codex",
+                "openai_runtime": "codex_app_server",
+            },
+        )
 
-    @pytest.mark.parametrize(
-        "model_cfg",
-        [
-            None,
-            {},
-            {"openai_runtime": ""},
-            {"openai_runtime": "auto"},
-            {"openai_runtime": "AUTO"},
-            {"other_key": "codex_app_server"},  # wrong key
-        ],
-    )
-    def test_default_off_for_openai(self, model_cfg) -> None:
-        """Default behavior is preserved when the flag is unset/auto."""
-        got = _maybe_apply_codex_app_server_runtime(
-            provider="openai", api_mode="chat_completions", model_cfg=model_cfg
-        )
-        assert got == "chat_completions"
+        def unexpected(*args, **kwargs):
+            raise AssertionError("legacy provider/token resolution must be skipped")
 
-    def test_opt_in_rewrites_openai(self) -> None:
-        got = _maybe_apply_codex_app_server_runtime(
-            provider="openai",
-            api_mode="chat_completions",
-            model_cfg={"openai_runtime": "codex_app_server"},
+        monkeypatch.setattr(runtime_provider_mod, "resolve_provider", unexpected)
+        monkeypatch.setattr(runtime_provider_mod, "load_pool", unexpected)
+        monkeypatch.setattr(
+            runtime_provider_mod,
+            "resolve_codex_runtime_credentials",
+            unexpected,
         )
-        assert got == "codex_app_server"
 
-    def test_opt_in_rewrites_openai_codex(self) -> None:
-        got = _maybe_apply_codex_app_server_runtime(
-            provider="openai-codex",
-            api_mode="codex_responses",
-            model_cfg={"openai_runtime": "codex_app_server"},
+        resolved = runtime_provider_mod.resolve_runtime_provider(
+            requested="openai-codex",
+            explicit_api_key="must-not-be-replayed",
+            explicit_base_url="https://chatgpt.com/backend-api/codex",
         )
-        assert got == "codex_app_server"
 
-    def test_case_insensitive(self) -> None:
-        got = _maybe_apply_codex_app_server_runtime(
-            provider="openai",
-            api_mode="chat_completions",
-            model_cfg={"openai_runtime": "Codex_App_Server"},
-        )
-        assert got == "codex_app_server"
+        assert resolved == {
+            "provider": "openai-codex",
+            "api_mode": "codex_app_server",
+            "base_url": "",
+            "api_key": "",
+            "source": "codex-app-server",
+            "credential_pool": None,
+            "requested_provider": "openai-codex",
+        }
 
-    @pytest.mark.parametrize(
-        "provider",
-        [
-            "anthropic",
-            "openrouter",
-            "xai",
-            "qwen-oauth",
-            "google-gemini-cli",
-            "opencode-zen",
-            "bedrock",
-            "",
-        ],
-    )
-    def test_other_providers_never_rerouted(self, provider) -> None:
-        """Non-OpenAI providers MUST NOT be rerouted even with the flag set —
-        codex's app-server can only run OpenAI/Codex auth flows."""
-        got = _maybe_apply_codex_app_server_runtime(
-            provider=provider,
-            api_mode="anthropic_messages",
-            model_cfg={"openai_runtime": "codex_app_server"},
+    def test_config_selected_openai_codex_takes_same_official_branch(
+        self, monkeypatch
+    ) -> None:
+        config = {
+            "provider": "openai-codex",
+            "openai_runtime": "Codex_App_Server",
+        }
+        monkeypatch.setattr(
+            runtime_provider_mod,
+            "_get_model_config",
+            lambda: dict(config),
         )
-        assert got == "anthropic_messages", (
-            f"provider={provider!r} should not be rerouted to codex_app_server"
+        monkeypatch.setattr(
+            runtime_provider_mod,
+            "resolve_provider",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("canonical provider resolution must be skipped")
+            ),
         )
+
+        resolved = runtime_provider_mod.resolve_runtime_provider()
+
+        assert resolved["provider"] == "openai-codex"
+        assert resolved["api_mode"] == "codex_app_server"
+        assert resolved["api_key"] == ""
+        assert resolved["base_url"] == ""
+
+    @pytest.mark.parametrize("configured_provider", ["openai", "", "openrouter"])
+    def test_runtime_flag_cannot_rewrite_an_inexact_persisted_provider(
+        self, monkeypatch, configured_provider
+    ) -> None:
+        resolved = runtime_provider_mod._credentialless_codex_app_server_runtime(
+            requested_provider="openai-codex",
+            model_cfg={
+                "provider": configured_provider,
+                "openai_runtime": "codex_app_server",
+            },
+        )
+
+        assert resolved is None
 
 
 class TestCodexAppServerModule:
@@ -110,7 +121,7 @@ class TestCodexAppServerModule:
     def test_module_imports(self) -> None:
         from agent.transports import codex_app_server
 
-        assert codex_app_server.MIN_CODEX_VERSION >= (0, 1, 0)
+        assert codex_app_server.MIN_CODEX_VERSION == (0, 144, 1)
         assert callable(codex_app_server.parse_codex_version)
         assert callable(codex_app_server.check_codex_binary)
 
@@ -142,6 +153,117 @@ class TestCodexAppServerModule:
         assert isinstance(err, RuntimeError)
         assert "boom" in str(err)
         assert "-32600" in str(err)
+
+
+class TestOfficialAccountAndModelHelpers:
+    @staticmethod
+    def _client():
+        from agent.transports.codex_app_server import CodexAppServerClient
+
+        client = object.__new__(CodexAppServerClient)
+        client._initialized = True
+        client.request = Mock(return_value={"ok": True})
+        return client
+
+    def test_account_read_uses_official_method(self) -> None:
+        client = self._client()
+
+        assert client.account_read(refresh_token=True, timeout=7) == {"ok": True}
+        client.request.assert_called_once_with(
+            "account/read", {"refreshToken": True}, timeout=7
+        )
+
+    def test_browser_login_uses_chatgpt_variant_only(self) -> None:
+        client = self._client()
+
+        client.account_login_start(
+            use_hosted_login_success_page=True,
+            codex_streamlined_login=False,
+            app_brand="codex",
+            timeout=8,
+        )
+
+        client.request.assert_called_once_with(
+            "account/login/start",
+            {
+                "type": "chatgpt",
+                "useHostedLoginSuccessPage": True,
+                "codexStreamlinedLogin": False,
+                "appBrand": "codex",
+            },
+            timeout=8,
+        )
+
+    def test_device_code_login_uses_official_variant(self) -> None:
+        client = self._client()
+
+        client.account_login_start(device_code=True)
+
+        client.request.assert_called_once_with(
+            "account/login/start",
+            {"type": "chatgptDeviceCode"},
+            timeout=30.0,
+        )
+
+    def test_logout_and_model_list_use_official_methods(self) -> None:
+        client = self._client()
+
+        client.account_logout(timeout=9)
+        client.model_list(
+            cursor="opaque-cursor",
+            limit=25,
+            include_hidden=False,
+            timeout=10,
+        )
+
+        assert client.request.call_args_list == [
+            call("account/logout", timeout=9),
+            call(
+                "model/list",
+                {
+                    "cursor": "opaque-cursor",
+                    "limit": 25,
+                    "includeHidden": False,
+                },
+                timeout=10,
+            ),
+        ]
+
+    def test_parameterless_notification_omits_params(self) -> None:
+        from agent.transports.codex_app_server import CodexAppServerClient
+
+        client = object.__new__(CodexAppServerClient)
+        client._send = Mock()
+
+        client.notify("initialized")
+
+        client._send.assert_called_once_with({"method": "initialized"})
+
+    def test_helpers_require_initialize(self) -> None:
+        client = self._client()
+        client._initialized = False
+
+        with pytest.raises(RuntimeError, match="initialized before account/read"):
+            client.account_read()
+
+        client.request.assert_not_called()
+
+    def test_device_code_rejects_browser_only_options(self) -> None:
+        client = self._client()
+
+        with pytest.raises(ValueError, match="browser login options"):
+            client.account_login_start(device_code=True, app_brand="codex")
+
+        client.request.assert_not_called()
+
+    @pytest.mark.parametrize("limit", [-1, True, 0x100000000])
+    def test_model_list_rejects_values_outside_wire_uint32(self, limit) -> None:
+        client = self._client()
+
+        with pytest.raises(ValueError, match="uint32"):
+            client.model_list(limit=limit)
+
+        client.request.assert_not_called()
 
 
 class TestSpawnEnvIsolation:
@@ -241,6 +363,97 @@ class TestSpawnEnvIsolation:
         assert captured["env"].get("CODEX_HOME") == "/tmp/profile/codex"
         # And HOME still passes through unchanged
         assert captured["env"].get("HOME") == "/users/alice"
+
+    def test_spawn_env_scrubs_provider_and_shared_gateway_settings(
+        self, monkeypatch
+    ):
+        import subprocess
+        from agent.transports import codex_app_server as cas
+
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                captured["env"] = kwargs.get("env", {}).copy()
+                self.stdin = None
+                self.stdout = None
+                self.stderr = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(subprocess, "Popen", FakePopen)
+        monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-child")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://shared.invalid")
+        monkeypatch.setenv("AI_GATEWAY_API_KEY", "must-not-reach-child")
+        monkeypatch.setenv("VERCEL_AI_GATEWAY_API_KEY", "must-not-reach-child")
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "must-not-reach-child")
+
+        client = cas.CodexAppServerClient(
+            codex_bin="codex",
+            env={
+                "OPENAI_API_KEY": "overlay-must-also-be-dropped",
+                "HERMES_MAIN_RUNTIME_PROVIDER": "openai-codex",
+            },
+        )
+        client._closed = True
+
+        assert "OPENAI_API_KEY" not in captured["env"]
+        assert "OPENAI_BASE_URL" not in captured["env"]
+        assert "AI_GATEWAY_API_KEY" not in captured["env"]
+        assert "VERCEL_AI_GATEWAY_API_KEY" not in captured["env"]
+        assert "AZURE_OPENAI_API_KEY" not in captured["env"]
+        assert captured["env"]["HERMES_MAIN_RUNTIME_PROVIDER"] == "openai-codex"
+
+    def test_absolute_binary_uses_standalone_app_server_argv(
+        self, monkeypatch, tmp_path
+    ):
+        import subprocess
+        from agent.transports import codex_app_server as cas
+
+        captured = {}
+        binary = tmp_path / "codex-app-server"
+        binary.touch()
+        binary.chmod(0o700)
+
+        class FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                captured["cmd"] = list(cmd)
+                self.stdin = None
+                self.stdout = None
+                self.stderr = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+        client = cas.CodexAppServerClient(codex_bin=str(binary))
+        client._closed = True
+
+        assert captured["cmd"] == [
+            str(binary),
+            "--session-source",
+            "exec",
+        ]
 
     def test_kanban_worker_adds_only_kanban_writable_root(self, monkeypatch):
         """Codex-runtime Kanban workers need to write board state outside

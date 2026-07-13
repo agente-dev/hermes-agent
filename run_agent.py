@@ -1389,6 +1389,15 @@ class AIAgent:
         here so existing tests that patch ``run_agent.threading.Thread``
         keep working.
         """
+        if (
+            self.provider == "openai-codex"
+            and self.api_mode == "codex_app_server"
+        ):
+            # The official subscription route is deliberately credentialless
+            # from Hermes' perspective. A review fork would require either
+            # replaying Codex-owned tokens or downgrading to the legacy direct
+            # Responses transport, so this route never spawns one.
+            return
         from agent.background_review import spawn_background_review_thread
         target, _prompt = spawn_background_review_thread(
             self,

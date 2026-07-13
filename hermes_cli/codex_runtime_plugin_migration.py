@@ -557,7 +557,7 @@ def _looks_like_test_tempdir(path: str) -> bool:
 def _build_hermes_tools_mcp_entry() -> dict:
     """Build the codex stdio-transport entry that launches Hermes' own
     tool surface as an MCP server. Codex's subprocess will call back into
-    this for browser/web/delegate_task/vision/memory/skills tools.
+    this for the curated browser/web/vision/image/skills tool subset.
 
     The command runs the worktree's Python via the current sys.executable
     so a hermes installed under /opt/, /usr/local/, or a venv all work.
@@ -592,6 +592,11 @@ def _build_hermes_tools_mcp_entry() -> dict:
     # Quiet mode + redaction defaults so the MCP wire stays clean.
     env["HERMES_QUIET"] = "1"
     env["HERMES_REDACT_SECRETS"] = env.get("HERMES_REDACT_SECRETS", "true")
+    # Pin the callback's exact non-secret route tuple in the MCP entry. Do not
+    # rely on Codex inheriting the parent environment: this subprocess must
+    # fail closed outside the standalone app-server route.
+    env["HERMES_MAIN_RUNTIME_PROVIDER"] = "openai-codex"
+    env["HERMES_MAIN_RUNTIME_API_MODE"] = "codex_app_server"
 
     out: dict[str, Any] = {
         "command": sys.executable,
@@ -599,7 +604,7 @@ def _build_hermes_tools_mcp_entry() -> dict:
     }
     if env:
         out["env"] = env
-    # Generous timeouts — browser_navigate or delegate_task can take a
+    # Generous timeouts — browser navigation and image work can take a
     # while; we don't want codex's MCP client to give up too early.
     out["startup_timeout_sec"] = 30.0
     out["tool_timeout_sec"] = 600.0
@@ -689,8 +694,8 @@ def migrate(
 
     # Inject Hermes' own tool surface as an MCP server so the spawned
     # codex subprocess can call back into Hermes for the tools codex
-    # doesn't ship with — web_search, browser_*, delegate_task, vision,
-    # memory, skills, session_search, image_generate, text_to_speech.
+    # doesn't ship with — web_search, browser_*, vision, skills,
+    # image_generate, and text_to_speech.
     # The server itself is agent/transports/hermes_tools_mcp_server.py
     # and is launched on demand by codex (stdio MCP).
     if expose_hermes_tools:

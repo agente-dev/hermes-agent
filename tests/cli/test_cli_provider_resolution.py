@@ -200,6 +200,39 @@ def test_runtime_resolution_rebuilds_agent_on_routing_change(monkeypatch):
     assert shell.api_mode == "codex_responses"
 
 
+def test_cli_accepts_credentialless_official_codex_runtime(monkeypatch):
+    cli = _import_cli()
+
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **kwargs: {
+            "provider": "openai-codex",
+            "api_mode": "codex_app_server",
+            "base_url": "",
+            "api_key": "",
+            "source": "codex-app-server",
+            "credential_pool": None,
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.format_runtime_provider_error",
+        lambda exc: str(exc),
+    )
+
+    shell = cli.HermesCLI(
+        model="gpt-5.3-codex",
+        provider="openai-codex",
+        compact=True,
+        max_turns=1,
+    )
+
+    assert shell._ensure_runtime_credentials() is True
+    assert shell.provider == "openai-codex"
+    assert shell.api_mode == "codex_app_server"
+    assert shell.api_key == ""
+    assert shell.base_url == ""
+
+
 def test_cli_turn_routing_uses_primary_when_disabled(monkeypatch):
     cli = _import_cli()
     shell = cli.HermesCLI(model="gpt-5", compact=True, max_turns=1)

@@ -1354,6 +1354,12 @@ def _read_codex_access_token() -> Optional[str]:
     fallback-to-Codex working when the pool state is stale but the stored OAuth
     token is still valid.
     """
+    if _official_codex_app_server_active():
+        logger.warning(
+            "Refusing to read legacy Codex OAuth tokens while the official "
+            "Codex app-server runtime is active."
+        )
+        return None
     pool_present, entry = _select_pool_entry("openai-codex")
     if pool_present:
         token = _pool_runtime_api_key(entry)
@@ -1945,6 +1951,12 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
 
     Returns (None, None) when no Codex OAuth token is available.
     """
+    if _official_codex_app_server_active():
+        logger.warning(
+            "Auxiliary Codex OAuth clients are disabled while the official "
+            "Codex app-server runtime is active."
+        )
+        return None, None
     if not model:
         logger.warning(
             "Auxiliary client: openai-codex requested without a model; "
@@ -2171,6 +2183,48 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
     if isinstance(provider, str):
         normalized["provider"] = provider.lower()
     return normalized
+
+
+def _official_codex_app_server_active(
+    main_runtime: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Return whether the exact zero-token ChatGPT subscription route is active.
+
+    An explicit live runtime is authoritative. Packaged MCP/tool child
+    processes receive the same non-secret route tuple through environment
+    markers. Process-local state is the final compatibility fallback for
+    existing single-turn callers that do not yet pass ``main_runtime``.
+
+    The guard is deliberately exact: legacy ``openai-codex`` Responses API
+    mode remains available outside Agente's official app-server route.
+    """
+    runtime = _normalize_main_runtime(main_runtime)
+    runtime_provider = str(runtime.get("provider") or "").strip().lower()
+    runtime_api_mode = str(runtime.get("api_mode") or "").strip().lower()
+    if runtime_provider or runtime_api_mode:
+        return (
+            runtime_provider == "openai-codex"
+            and runtime_api_mode == "codex_app_server"
+        )
+
+    env_provider = os.getenv("HERMES_MAIN_RUNTIME_PROVIDER", "").strip().lower()
+    env_api_mode = os.getenv("HERMES_MAIN_RUNTIME_API_MODE", "").strip().lower()
+    if env_provider or env_api_mode:
+        return env_provider == "openai-codex" and env_api_mode == "codex_app_server"
+
+    return (
+        _RUNTIME_MAIN_PROVIDER.strip().lower() == "openai-codex"
+        and _RUNTIME_MAIN_API_MODE.strip().lower() == "codex_app_server"
+    )
+
+
+def _official_codex_auxiliary_error(task: Optional[str] = None) -> RuntimeError:
+    label = task or "call"
+    return RuntimeError(
+        f"Auxiliary {label} is disabled for the official ChatGPT subscription "
+        "route. The standalone Codex app-server owns the complete model turn "
+        "and Hermes must not read, copy, or replay its OAuth tokens."
+    )
 
 
 def _get_provider_chain() -> List[tuple]:
@@ -3071,6 +3125,12 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
       2. OpenRouter → Nous → custom → Codex → API-key providers (fallback
          chain, only used when the main provider has no working client).
     """
+    if _official_codex_app_server_active(main_runtime):
+        logger.info(
+            "Auxiliary auto-detection disabled for the official Codex "
+            "app-server runtime."
+        )
+        return None, None
     global auxiliary_is_nous, _stale_base_url_warned
     auxiliary_is_nous = False  # Reset — _try_nous() will set True if it wins
     runtime = _normalize_main_runtime(main_runtime)
@@ -3304,6 +3364,12 @@ def resolve_provider_client(
     Returns:
         (client, resolved_model) or (None, None) if auth is unavailable.
     """
+    if _official_codex_app_server_active(main_runtime):
+        logger.info(
+            "Auxiliary provider resolution disabled for the official Codex "
+            "app-server runtime."
+        )
+        return None, None
     _validate_proxy_env_urls()
     # Preserve the original provider name before alias normalization so a
     # user-declared ``custom_providers`` entry whose name coincidentally
@@ -4024,6 +4090,8 @@ def get_available_vision_backends() -> List[str]:
     source of truth for setup, tool gating, and runtime auto-routing of
     vision tasks.
     """
+    if _official_codex_app_server_active():
+        return []
     available: List[str] = []
     # 1. Active provider — if the user configured a provider, try it first.
     main_provider = _read_main_provider()
@@ -4049,6 +4117,7 @@ def resolve_vision_provider_client(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     async_mode: bool = False,
+    main_runtime: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
     """Resolve the client actually used for vision tasks.
 
@@ -4057,6 +4126,12 @@ def resolve_vision_provider_client(
     backends, so users can intentionally force experimental providers. Auto mode
     stays conservative and only tries vision backends known to work today.
     """
+    if _official_codex_app_server_active(main_runtime):
+        logger.info(
+            "Auxiliary vision resolution disabled for the official Codex "
+            "app-server runtime."
+        )
+        return None, None, None
     requested, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         "vision", provider, model, base_url, api_key
     )
@@ -4082,6 +4157,7 @@ def resolve_vision_provider_client(
             explicit_base_url=resolved_base_url,
             explicit_api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
         )
         if client is None:
             return provider_for_base_override, None, None
@@ -4147,6 +4223,7 @@ def resolve_vision_provider_client(
                 rpc_client, rpc_model = resolve_provider_client(
                     main_provider, vision_model,
                     api_mode=resolved_api_mode,
+                    main_runtime=main_runtime,
                     is_vision=True)
                 if rpc_client is not None:
                     logger.info(
@@ -4189,6 +4266,7 @@ def resolve_vision_provider_client(
                 base_url=_zai_url,
                 api_key=resolved_api_key or None,
                 api_mode="chat_completions",
+                main_runtime=main_runtime,
                 is_vision=True,
             )
             if client is not None:
@@ -4196,6 +4274,7 @@ def resolve_vision_provider_client(
         # Fallback: try without explicit base_url (old behavior)
         client, final_model = _get_cached_client(requested, resolved_model, async_mode,
                                                  api_mode=resolved_api_mode,
+                                                 main_runtime=main_runtime,
                                                  is_vision=True)
         if client is None:
             return requested, None, None
@@ -4203,6 +4282,7 @@ def resolve_vision_provider_client(
 
     client, final_model = _get_cached_client(requested, resolved_model, async_mode,
                                              api_mode=resolved_api_mode,
+                                             main_runtime=main_runtime,
                                              is_vision=True)
     if client is None:
         return requested, None, None
@@ -4481,6 +4561,12 @@ def _get_cached_client(
     preventing the fd-exhaustion that previously occurred in long-running
     gateways where recycled worker threads created unbounded entries (#10200).
     """
+    if _official_codex_app_server_active(main_runtime):
+        logger.info(
+            "Auxiliary client cache disabled for the official Codex "
+            "app-server runtime."
+        )
+        return None, None
     # Resolve the current event loop for async clients so we can validate
     # cached entries.  Loop identity is NOT in the cache key — instead we
     # check at hit time whether the cached loop is still current and open.
@@ -4995,6 +5081,8 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
+    if _official_codex_app_server_active(main_runtime):
+        raise _official_codex_auxiliary_error(task)
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
@@ -5007,6 +5095,7 @@ def call_llm(
             base_url=resolved_base_url or base_url,
             api_key=resolved_api_key or api_key,
             async_mode=False,
+            main_runtime=main_runtime,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning(
@@ -5017,6 +5106,7 @@ def call_llm(
                 provider="auto",
                 model=resolved_model,
                 async_mode=False,
+                main_runtime=main_runtime,
             )
         if client is None:
             raise RuntimeError(
@@ -5479,6 +5569,8 @@ async def async_call_llm(
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
+    if _official_codex_app_server_active(main_runtime):
+        raise _official_codex_auxiliary_error(task)
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
@@ -5491,6 +5583,7 @@ async def async_call_llm(
             base_url=resolved_base_url or base_url,
             api_key=resolved_api_key or api_key,
             async_mode=True,
+            main_runtime=main_runtime,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning(
@@ -5501,6 +5594,7 @@ async def async_call_llm(
                 provider="auto",
                 model=resolved_model,
                 async_mode=True,
+                main_runtime=main_runtime,
             )
         if client is None:
             raise RuntimeError(
@@ -5516,6 +5610,7 @@ async def async_call_llm(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
         )
         if client is None:
             _explicit = (resolved_provider or "").strip().lower()
@@ -5528,7 +5623,9 @@ async def async_call_llm(
             if not resolved_base_url:
                 logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
                             task or "call", resolved_provider)
-                client, final_model = _get_cached_client("auto", async_mode=True)
+                client, final_model = _get_cached_client(
+                    "auto", async_mode=True, main_runtime=main_runtime
+                )
         if client is None:
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "

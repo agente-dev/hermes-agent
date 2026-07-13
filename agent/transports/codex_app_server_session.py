@@ -123,7 +123,7 @@ def _coerce_turn_input_text(user_input: Any) -> str:
 
 # Substrings in codex stderr / JSON-RPC error messages that signal the
 # subprocess died because its OAuth credentials are no longer valid.
-# Kept conservative: we only redirect users to `codex login` when we're
+# Kept conservative: we only redirect users to Desktop reconnect when we're
 # reasonably sure that's the actual failure, otherwise we surface the
 # original error verbatim. Mirrors openclaw beta.8's auth-refresh
 # classification.
@@ -150,6 +150,24 @@ _OAUTH_REFRESH_FAILURE_HINTS = (
     "oauth",
 )
 
+_STALE_THREAD_HINTS = (
+    "thread not found",
+    "unknown thread",
+    "session not found",
+    "rollout not found",
+    "no rollout found",
+    "failed to load rollout",
+)
+
+
+def _is_stale_thread_error(exc: CodexAppServerError) -> bool:
+    message = str(getattr(exc, "message", "") or "").lower()
+    if any(hint in message for hint in _STALE_THREAD_HINTS):
+        return True
+    return "does not exist" in message and any(
+        subject in message for subject in ("thread", "session", "rollout")
+    )
+
 
 def _classify_oauth_failure(*parts: str) -> Optional[str]:
     """Return a user-friendly re-auth hint if any of the provided strings
@@ -157,7 +175,7 @@ def _classify_oauth_failure(*parts: str) -> Optional[str]:
 
     Used for both `turn/start` JSON-RPC errors and post-mortem stderr
     inspection when the subprocess exits unexpectedly. Conservative on
-    purpose — we only redirect users to `codex login` when the signal
+    purpose — we only redirect users to Desktop reconnect when the signal
     is strong, so unrelated runtime failures still surface verbatim.
     """
     haystack = " ".join(p for p in parts if p).lower()
@@ -166,10 +184,9 @@ def _classify_oauth_failure(*parts: str) -> Optional[str]:
     for needle in _OAUTH_REFRESH_FAILURE_HINTS:
         if needle in haystack:
             return (
-                "Codex authentication failed — your ChatGPT/Codex login "
-                "looks expired or invalid. Run `codex login` to refresh, "
-                "then retry. (Fall back to default runtime with "
-                "`/codex-runtime auto` if the issue persists.)"
+                "Codex authentication failed — your ChatGPT subscription "
+                "connection looks expired or invalid. Reconnect OpenAI in "
+                "Agente Desktop Settings, then retry."
             )
     return None
 
@@ -200,15 +217,21 @@ class CodexAppServerSession:
         cwd: Optional[str] = None,
         codex_bin: str = "codex",
         codex_home: Optional[str] = None,
+        model: Optional[str] = None,
+        resume_thread_id: Optional[str] = None,
         permission_profile: Optional[str] = None,
         approval_callback: Optional[Callable[..., str]] = None,
+        elicitation_callback: Optional[Callable[[dict[str, Any]], Any]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
+        child_env: Optional[dict[str, str]] = None,
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._codex_bin = codex_bin
         self._codex_home = codex_home
+        self._model = str(model or "").strip()
+        self._resume_thread_id = str(resume_thread_id or "").strip() or None
         self._permission_profile = (
             permission_profile or _HERMES_TO_CODEX_PERMISSION_PROFILE.get(
                 os.environ.get("HERMES_TERMINAL_SECURITY_MODE", "auto"),
@@ -216,9 +239,18 @@ class CodexAppServerSession:
             )
         )
         self._approval_callback = approval_callback
+        self._elicitation_callback = elicitation_callback
         self._on_event = on_event  # Display hook (kawaii spinner ticks etc.)
         self._routing = request_routing or _ServerRequestRouting()
         self._client_factory = client_factory or CodexAppServerClient
+        # Per-child overlay only.  The wire client merges this into a private
+        # ``os.environ.copy()`` for ``subprocess.Popen``; the parent process
+        # environment is never mutated (important for concurrent gateways).
+        self._child_env = {
+            str(key): str(value)
+            for key, value in (child_env or {}).items()
+            if key and value is not None
+        }
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
@@ -241,13 +273,25 @@ class CodexAppServerSession:
             return self._thread_id
         if self._client is None:
             self._client = self._client_factory(
-                codex_bin=self._codex_bin, codex_home=self._codex_home
+                codex_bin=self._codex_bin,
+                codex_home=self._codex_home,
+                env=dict(self._child_env),
             )
         self._client.initialize(
             client_name="hermes",
             client_title="Hermes Agent",
             client_version=_get_hermes_version(),
         )
+        account_snapshot = self._client.account_read(refresh_token=False)
+        account = account_snapshot.get("account") or {}
+        if account.get("type") != "chatgpt":
+            raise CodexAppServerError(
+                code=-32001,
+                message=(
+                    "OpenAI is not connected as a ChatGPT subscription. "
+                    "Reconnect OpenAI in Agente Desktop Settings."
+                ),
+            )
         # Permission selection is intentionally NOT sent on thread/start.
         # Two reasons (live-tested against codex 0.130.0):
         #   1. `thread/start.permissions` is gated behind the experimentalApi
@@ -264,7 +308,22 @@ class CodexAppServerSession:
         # Users who want a write-capable profile configure it in their
         # ~/.codex/config.toml the same way they would for any codex usage.
         params: dict[str, Any] = {"cwd": self._cwd}
-        result = self._client.request("thread/start", params, timeout=15)
+        if self._model:
+            params["model"] = self._model
+        method = "thread/start"
+        if self._resume_thread_id:
+            method = "thread/resume"
+            params["threadId"] = self._resume_thread_id
+        try:
+            result = self._client.request(method, params, timeout=15)
+        except CodexAppServerError as exc:
+            if method != "thread/resume" or not _is_stale_thread_error(exc):
+                raise
+            logger.info("stored Codex thread is unavailable; starting a new thread")
+            self._resume_thread_id = None
+            method = "thread/start"
+            params.pop("threadId", None)
+            result = self._client.request(method, params, timeout=15)
         # Cross-fill thread.id/sessionId — different codex versions have
         # serialized this under either key. Mirrors openclaw beta.8's
         # tolerance fix so future codex drops/renames don't KeyError us
@@ -280,7 +339,7 @@ class CodexAppServerSession:
             raise CodexAppServerError(
                 code=-32603,
                 message=(
-                    "codex thread/start returned no thread id "
+                    f"codex {method} returned no thread id "
                     f"(payload keys: {sorted(result.keys())})"
                 ),
             )
@@ -414,7 +473,7 @@ class CodexAppServerSession:
             )
         except CodexAppServerError as exc:
             # Classify auth/refresh failures so the user gets a clear
-            # `codex login` pointer instead of a raw RPC error string.
+            # Desktop reconnect path instead of a raw RPC error string.
             stderr_blob = "\n".join(self._client.stderr_tail(40))
             hint = _classify_oauth_failure(exc.message, stderr_blob)
             if hint is not None:
@@ -422,7 +481,7 @@ class CodexAppServerSession:
                 # Subprocess is fine on a JSON-RPC level here, but the
                 # token store is broken — retire so the next turn does a
                 # clean handshake (and the user has a chance to re-auth
-                # via `codex login` between turns).
+                # through Desktop between turns).
                 result.should_retire = True
             else:
                 result.error = self._format_error_with_stderr(
@@ -661,25 +720,11 @@ class CodexAppServerSession:
             # shouldn't be silently accepted.
             self._client.respond(rid, {"decision": "decline"})
         elif method == "mcpServer/elicitation/request":
-            # Codex's MCP layer asks the user for structured input on
-            # behalf of an MCP server (e.g. tool-call confirmation,
-            # OAuth, form data). For our own hermes-tools callback we
-            # auto-accept — the user already approved Hermes' tools
-            # by enabling the runtime, and we never expose anything
-            # codex's built-in shell can't already do. For other MCP
-            # servers we decline so the user explicitly opts in via
-            # codex's own auth flow.
-            server_name = params.get("serverName") or ""
-            if server_name == "hermes-tools":
-                self._client.respond(
-                    rid,
-                    {"action": "accept", "content": None, "_meta": None},
-                )
-            else:
-                self._client.respond(
-                    rid,
-                    {"action": "decline", "content": None, "_meta": None},
-                )
+            # Elicitations can ask for OAuth, confirmation, or arbitrary form
+            # data.  Server identity is not authorization: even our managed
+            # ``hermes-tools`` server must fail closed unless a caller wires an
+            # explicit trusted UI/policy callback for this session.
+            self._client.respond(rid, self._decide_mcp_elicitation(params))
         else:
             # Unknown server request — codex can extend this surface. Reject
             # cleanly so codex doesn't hang waiting for us.
@@ -687,6 +732,43 @@ class CodexAppServerSession:
             self._client.respond_error(
                 rid, code=-32601, message=f"Unsupported method: {method}"
             )
+
+    def _decide_mcp_elicitation(self, params: dict) -> dict:
+        """Return a validated app-server elicitation response.
+
+        The callback is deliberately separate from command/file approval:
+        elicitation content may contain credentials or structured form data,
+        and a generic "approve" callback cannot safely manufacture it.  A
+        trusted integration may return either an action string or the official
+        response dict ``{action, content?, _meta?}``.  Unknown/malformed values
+        and callback failures decline.
+        """
+        decline = {"action": "decline", "content": None, "_meta": None}
+        if self._elicitation_callback is None:
+            return decline
+        try:
+            decision = self._elicitation_callback(dict(params))
+        except Exception:
+            # The callback may be processing OAuth/form input.  Fail closed
+            # without serializing its exception (which could contain user
+            # input or credentials) into logs.
+            logger.warning("elicitation_callback failed; declining request")
+            return decline
+
+        if isinstance(decision, str):
+            action = decision
+            content = None
+            meta = None
+        elif isinstance(decision, dict):
+            action = decision.get("action")
+            content = decision.get("content")
+            meta = decision.get("_meta")
+        else:
+            return decline
+
+        if action not in {"accept", "decline", "cancel"}:
+            return decline
+        return {"action": action, "content": content, "_meta": meta}
 
     def _decide_exec_approval(self, params: dict) -> str:
         if self._routing.auto_approve_exec:

@@ -8,6 +8,7 @@ build helper assembles a server when the SDK is present.
 
 from __future__ import annotations
 
+import pytest
 
 
 
@@ -98,6 +99,26 @@ class TestModuleSurface:
 
 
 class TestMain:
+    @pytest.fixture(autouse=True)
+    def _official_route_markers(self, monkeypatch):
+        monkeypatch.setenv("HERMES_MAIN_RUNTIME_PROVIDER", "openai-codex")
+        monkeypatch.setenv("HERMES_MAIN_RUNTIME_API_MODE", "codex_app_server")
+
+    def test_main_refuses_without_exact_route_markers(self, monkeypatch):
+        import agent.transports.hermes_tools_mcp_server as m
+
+        monkeypatch.delenv("HERMES_MAIN_RUNTIME_PROVIDER", raising=False)
+        monkeypatch.delenv("HERMES_MAIN_RUNTIME_API_MODE", raising=False)
+        monkeypatch.setattr(
+            m,
+            "_build_server",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("server must not build without route markers")
+            ),
+        )
+
+        assert m.main([]) == 2
+
     def test_main_returns_2_when_mcp_unavailable(self, monkeypatch):
         """When the mcp package isn't installed, main() should exit
         cleanly with code 2 and an install hint, not crash."""

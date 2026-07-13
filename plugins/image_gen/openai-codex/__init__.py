@@ -35,6 +35,16 @@ from agent.image_gen_provider import (
 logger = logging.getLogger(__name__)
 
 
+def _official_codex_app_server_active() -> bool:
+    """Return whether Agente's standalone, zero-token Codex route is active."""
+    try:
+        from agent.auxiliary_client import _official_codex_app_server_active as _active
+
+        return bool(_active())
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Model catalog — mirrors the ``openai`` plugin so the picker UX is identical.
 # ---------------------------------------------------------------------------
@@ -244,6 +254,11 @@ def _iter_sse_json(response: Any):
 
 def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> Optional[str]:
     """Stream a Codex Responses image_generation call and return the b64 image."""
+    if _official_codex_app_server_active():
+        raise RuntimeError(
+            "Legacy Codex OAuth image generation is disabled for the official "
+            "standalone Codex app-server route."
+        )
     import httpx
     from agent.auxiliary_client import _codex_cloudflare_headers
 
@@ -292,6 +307,8 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         return "OpenAI (Codex auth)"
 
     def is_available(self) -> bool:
+        if _official_codex_app_server_active():
+            return False
         if not _read_codex_access_token():
             return False
         try:
@@ -340,6 +357,20 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
             return error_response(
                 error="Prompt is required and must be a non-empty string",
                 error_type="invalid_argument",
+                provider="openai-codex",
+                aspect_ratio=aspect,
+            )
+
+        if _official_codex_app_server_active():
+            return error_response(
+                error=(
+                    "The legacy Codex OAuth image backend is disabled for the "
+                    "official ChatGPT subscription route. The standalone Codex "
+                    "app-server owns its credentials and Hermes cannot read or "
+                    "replay them. Configure a separate image provider if image "
+                    "generation is required."
+                ),
+                error_type="unsupported_route",
                 provider="openai-codex",
                 aspect_ratio=aspect,
             )
