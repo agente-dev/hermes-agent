@@ -195,6 +195,21 @@ def get_prune_builtins() -> bool:
     return bool(cfg.get("prune_builtins", True))
 
 
+def get_managed_packs() -> list:
+    """Opt-in list of installed (non-agent-created) skill names that the
+    curator may content-patch as if they were agent-created skills.
+
+    Empty by default. Skills in this list receive the same backup/rollback/
+    audit safety as agent-created skills. Hub-installed skills NOT on this
+    list remain strictly off-limits.
+    """
+    cfg = _load_config()
+    value = cfg.get("managed_packs", [])
+    if not isinstance(value, list):
+        return []
+    return [str(s) for s in value if s]
+
+
 # ---------------------------------------------------------------------------
 # Idle / interval check
 # ---------------------------------------------------------------------------
@@ -1392,9 +1407,9 @@ def _render_report_markdown(p: Dict[str, Any]) -> str:
 # Orchestrator — spawn a forked AIAgent for the LLM review pass
 # ---------------------------------------------------------------------------
 
-def _render_candidate_list() -> str:
+def _render_candidate_list(managed_packs: Optional[list] = None) -> str:
     """Human/agent-readable list of agent-created skills with usage stats."""
-    rows = skill_usage.agent_created_report()
+    rows = skill_usage.agent_created_report(managed_packs=managed_packs)
     if not rows:
         return "No agent-created skills to review."
     lines = [f"Agent-created skills ({len(rows)}):\n"]
@@ -1499,7 +1514,8 @@ def run_curator_review(
 
         llm_meta: Dict[str, Any] = {}
         try:
-            candidate_list = _render_candidate_list()
+            managed_packs = get_managed_packs()
+            candidate_list = _render_candidate_list(managed_packs=managed_packs or None)
             if "No agent-created skills" in candidate_list:
                 final_summary = f"{prefix}{auto_summary}; llm: skipped (no candidates)"
                 llm_meta = {
@@ -1527,14 +1543,30 @@ def run_curator_review(
                         "delete). It will be restored on `hermes update` only if "
                         "the user explicitly restores it."
                     )
+                managed_packs_note = ""
+                if managed_packs:
+                    managed_packs_note = (
+                        "\n\nMANAGED-PACKS OVERRIDE: the following installed "
+                        "(non-agent-created) skills have been explicitly opted in "
+                        "by the user and ARE included in the candidate list below. "
+                        "They MAY be content-patched or archived just like "
+                        "agent-created skills, overriding hard rule #1 for these "
+                        "skills ONLY. Hub-installed skills NOT on this list remain "
+                        "strictly off-limits. Managed packs: "
+                        + ", ".join(managed_packs)
+                        + "."
+                    )
                 if dry_run:
                     prompt = (
                         f"{CURATOR_DRY_RUN_BANNER}\n\n"
-                        f"{CURATOR_REVIEW_PROMPT}{builtins_note}\n\n"
+                        f"{CURATOR_REVIEW_PROMPT}{builtins_note}{managed_packs_note}\n\n"
                         f"{candidate_list}"
                     )
                 else:
-                    prompt = f"{CURATOR_REVIEW_PROMPT}{builtins_note}\n\n{candidate_list}"
+                    prompt = (
+                        f"{CURATOR_REVIEW_PROMPT}{builtins_note}{managed_packs_note}\n\n"
+                        f"{candidate_list}"
+                    )
                 llm_meta = _run_llm_review(prompt)
                 final_summary = (
                     f"{prefix}{auto_summary}; llm: {llm_meta.get('summary', 'no change')}"
