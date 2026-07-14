@@ -361,6 +361,17 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Initial card status. Use 'blocked' for cards "
                                "that require immediate human ops (R3 gate) "
                                "to skip the brief running-to-blocked transition.")
+    p_create.add_argument("--workflow-template-id", default=None,
+                          dest="workflow_template_id",
+                          help="Workflow template id to tag on the card "
+                               "(used by the workflow-to-kanban-dag translator "
+                               "for done-parent gating across steps).")
+    p_create.add_argument("--step-key", default=None,
+                          dest="current_step_key",
+                          help="Workflow step key to tag on the card "
+                               "(used together with --workflow-template-id to "
+                               "identify which step in the template this card "
+                               "represents).")
     p_create.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # --- swarm ---
@@ -1346,6 +1357,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
             initial_status=getattr(args, "initial_status", "running"),
+            workflow_template_id=getattr(args, "workflow_template_id", None),
+            current_step_key=getattr(args, "current_step_key", None),
         )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
