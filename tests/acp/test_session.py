@@ -57,11 +57,11 @@ class TestCreateSession:
             fake_register_task_env_overrides,
         )
 
-        acp_session._register_task_cwd("session-1", r"E:\Projects\AI\paperclip")
+        acp_session._register_task_cwd("session-1", r"E:\Projects\AI\sample-project")
 
         assert captured == {
             "task_id": "session-1",
-            "overrides": {"cwd": "/mnt/e/Projects/AI/paperclip"},
+            "overrides": {"cwd": "/mnt/e/Projects/AI/sample-project"},
         }
 
     def test_session_ids_are_unique(self, manager):
@@ -89,7 +89,7 @@ class TestWslCwdTranslation:
     def test_translate_acp_cwd_converts_windows_drive_path_when_wsl(self, monkeypatch):
         monkeypatch.setattr("hermes_constants._wsl_detected", True)
 
-        assert acp_session._translate_acp_cwd(r"E:\Projects\AI\paperclip") == "/mnt/e/Projects/AI/paperclip"
+        assert acp_session._translate_acp_cwd(r"E:\Projects\AI\sample-project") == "/mnt/e/Projects/AI/sample-project"
 
     def test_translate_acp_cwd_handles_forward_slashes_when_wsl(self, monkeypatch):
         monkeypatch.setattr("hermes_constants._wsl_detected", True)
@@ -99,19 +99,19 @@ class TestWslCwdTranslation:
     def test_translate_acp_cwd_leaves_windows_drive_path_unchanged_off_wsl(self, monkeypatch):
         monkeypatch.setattr("hermes_constants._wsl_detected", False)
 
-        assert acp_session._translate_acp_cwd(r"E:\Projects\AI\paperclip") == r"E:\Projects\AI\paperclip"
+        assert acp_session._translate_acp_cwd(r"E:\Projects\AI\sample-project") == r"E:\Projects\AI\sample-project"
 
     def test_translate_acp_cwd_leaves_posix_path_unchanged_on_wsl(self, monkeypatch):
         monkeypatch.setattr("hermes_constants._wsl_detected", True)
 
-        assert acp_session._translate_acp_cwd("/mnt/e/Projects/AI/paperclip") == "/mnt/e/Projects/AI/paperclip"
+        assert acp_session._translate_acp_cwd("/mnt/e/Projects/AI/sample-project") == "/mnt/e/Projects/AI/sample-project"
 
     def test_create_session_stores_translated_cwd_on_wsl(self, manager, monkeypatch):
         monkeypatch.setattr("hermes_constants._wsl_detected", True)
 
-        state = manager.create_session(cwd=r"E:\Projects\AI\paperclip")
+        state = manager.create_session(cwd=r"E:\Projects\AI\sample-project")
 
-        assert state.cwd == "/mnt/e/Projects/AI/paperclip"
+        assert state.cwd == "/mnt/e/Projects/AI/sample-project"
 
     def test_fork_session_stores_translated_cwd_on_wsl(self, manager, monkeypatch):
         monkeypatch.setattr("hermes_constants._wsl_detected", True)
