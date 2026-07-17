@@ -1078,17 +1078,6 @@
     "size": "md"
   },
   {
-    "id": "discord-dalekc72-hermes-managing-tickets",
-    "source": "discord",
-    "author": "@dalekc72",
-    "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1493589434971717763-Small-Win---Hermes---Claude-Code-managing-my-Tickets.txt",
-    "date": "",
-    "category": "business-ops",
-    "headline": "Hermes triages and works tickets in my PM software",
-    "quote": "Super excited that Hermes and Claude Code are now working tickets in my PM software, Plane.so. Tickets come in and Hermes triages and assigns and starts working the tickets. Basically Paperclip that gets sh*t done. They then document in the ticket and if needed create documentation for Obsidian.",
-    "size": "lg"
-  },
-  {
     "id": "gh-alexferrari-checkin",
     "source": "github",
     "author": "@alexferrari88",
@@ -1945,28 +1934,6 @@
     "headline": "A plugin that lets Hermes think while I'm away",
     "quote": "I built a plugin that lets Hermes think while you're away. Dream Auto indexes your sessions, grades them for 'dream potential,' and runs MCTS-powered background reasoning jobs when your machine is idle. The insights get injected into your active context automatically — no disruption, just smarter responses.",
     "size": "md"
-  },
-  {
-    "id": "captain-awesome-pm-standups-adhd",
-    "source": "x",
-    "author": "@emmagine79",
-    "url": "https://x.com/emmagine79/status/2053360898501468362",
-    "date": "2026-05-10",
-    "category": "personal-assistant",
-    "headline": "PM agent runs morning + evening standups for my ADHD",
-    "quote": "I have hermes act as the manager to several paperclip agents, one of them a Project Manager agent. This agent has full knowledge of me (ADHD), my vault and projects, so I get a morning and evening standup that dumps all work we did across different chats, projects I'm working on, actual output, info from past standups, and suggestions/prioritizing based on all of the above. And it's self-learning.",
-    "size": "md"
-  },
-  {
-    "source": "reddit",
-    "author": "u/patbhakta",
-    "url": "https://www.reddit.com/r/Rag/comments/1sgmvxh/anyone_here_tried_hermes_agent_whats_your/",
-    "date": "2026-04-09",
-    "category": "personal-assistant",
-    "headline": "Hermes vs OpenClaw: memory lets me jump between projects",
-    "quote": "I'm using Hermes currently but only as a beginner agent. It's kinda like a VA. The good part about Hermes vs openclaw is memory. With OpenClaw it's a one track mind. With Hermes I can jump from one project to next but also go back to something from last week or more. Personally I use Hermes with paperclip which is chat.",
-    "size": "md",
-    "id": "reddit-patbhakta-hermes-vs-openclaw"
   },
   {
     "id": "gkisokay-watchdog",

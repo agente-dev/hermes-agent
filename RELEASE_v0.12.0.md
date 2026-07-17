@@ -488,7 +488,7 @@ Salvaged or co-authored work from **@isaachuangGMICLOUD** (GMI Cloud), earlier u
 @MagicRay1217, @math0r-be, @MattMaximo, @maxims-oss, @MaxyMoos, @maymuneth, @mcndjxlefnd, @memosr,
 @MestreY0d4-Uninter, @mewwts, @Mirac1eSky, @MorAlekss, @mrhwick, @mrunmayee17, @mssteuer, @Nanako0129,
 @nazirulhafiy, @Nerijusas, @Nicecsh, @nicoloboschi, @nightq, @ningfangbin, @octo-patch, @Octopus,
-@OutThisLife, @Paperclip, @pein892, @perlowja, @prasadus92, @qike-ms, @qiyin-code, @Readon, @ReginaldasR,
+@OutThisLife, @pein892, @perlowja, @prasadus92, @qike-ms, @qiyin-code, @Readon, @ReginaldasR,
 @revaraver, @rfilgueiras, @rmoen, @romanornr, @rugvedS07, @rylena, @samrusani, @Sanjays2402, @sasha-id,
 @Satoshi-agi, @scheidti, @scotttrinh, @season179, @SeeYangZhi, @sgaofen, @shamork, @shannonsands, @SHL0MS,
 @simbam99, @Societus, @socrates1024, @Sonoyunchu, @sprmn24, @stephenschoettler, @tangyuanjc, @TechPrototyper,

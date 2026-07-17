@@ -1192,7 +1192,6 @@ AUTHOR_MAP = {
     "liyuan851277048@icloud.com": "Octopus",  # co-author only
     "me+github7604@versun.org": "Versun",  # co-author only
     "my.vesper.nine@gmail.com": "kevin-ho",  # salvage: PR #15488 author @kevin-ho
-    "noreply@paperclip.ing": "Paperclip",  # co-author only
     "teknium@hermes-agent": "teknium1",
     "web3blind@gmail.com": "web3blind",
     "ztzheng@163.com": "chengoak",  # PR #17467
